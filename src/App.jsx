@@ -634,11 +634,21 @@ function PlanView(props){
   var covs=DAYS.map(function(d,i){return dayCoverages(state,sm,week,d,reqData[i].effective);});
   var tsLog=state.timesheetLog||[];
   var educators=state.team.filter(function(p){return p.coverage&&!p.kitchen&&!p.cleaning&&!p.eltern&&!p.springer&&p.active;});
+  var isCurrentWeek=wkIdx===currentWeekIndex();
+  var todayCut=new Date(todayISO()+"T00:00:00");
+  var dayIsPast=DAYS.map(function(d,i){
+    if(!isCurrentWeek)return false;
+    var wkMo=WEEKS[wkIdx]?WEEKS[wkIdx].mo:null;
+    if(!wkMo)return false;
+    var dd=new Date(wkMo);dd.setDate(wkMo.getDate()+i);dd.setHours(0,0,0,0);
+    return dd<todayCut;
+  });
 
   return React.createElement("section",null,
     /* top bar */
     React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14,flexWrap:"wrap",gap:12}},
       React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}},
+        React.createElement("button",{onClick:function(){setWeek(WEEKS[currentWeekIndex()].key);},style:Object.assign({},btnStyle,{padding:"5px 12px",fontSize:12.5,fontWeight:700})},"Current week"),
         React.createElement("button",{onClick:prevWeek,disabled:wkIdx===0,style:Object.assign({},btnStyle,{padding:"5px 10px",fontSize:14,opacity:wkIdx===0?0.3:1})},"←"),
         React.createElement("select",{value:week,onChange:function(e){setWeek(e.target.value);},style:selStyle},
           WEEKS.map(function(x){return React.createElement("option",{key:x.key,value:x.key},x.kw+" · "+x.range);})
@@ -701,7 +711,7 @@ function PlanView(props){
                 var dayDate=wkMo?new Date(wkMo):null;
                 if(dayDate)dayDate.setDate(wkMo.getDate()+i);
                 var ddmm=dayDate?(String(dayDate.getDate()).padStart(2,"0")+"/"+String(dayDate.getMonth()+1).padStart(2,"0")):"";
-                return React.createElement("th",{key:d,style:th},d,
+                return React.createElement("th",{key:d,style:Object.assign({},th,{opacity:dayIsPast[i]?0.55:1})},d,
                   ddmm?React.createElement("div",{style:{fontSize:10,fontWeight:400,color:C.faint,marginTop:1}},ddmm):null
                 );
               }),
@@ -724,7 +734,7 @@ function PlanView(props){
                   roleTag&&React.createElement("span",{style:{color:roleColor,fontSize:11,marginLeft:6}},roleTag),
                   pw.divergence&&React.createElement("span",{style:{color:C.warn,fontSize:11,marginLeft:6}},"⚠TS")
                 ),
-                DAYS.map(function(d){
+                DAYS.map(function(d,i){
                   var ab=absCodeForCell(state.absences||[],p.id,week,d);
                   var code=ab||cellCode(state,week,p.id,d);
                   var sh=sm[code];
@@ -733,7 +743,7 @@ function PlanView(props){
                   var conflict=sh&&sh.work&&!isCustomCell&&availConflict(sh,availVal(p,d));
                   var isSickCode=sh&&sh.sick;var isNonSickAbsence=sh&&!sh.work&&!sh.sick&&!sh.work;var bg=ab?(sm[ab]&&sm[ab].sick?"#F9E0E0":"#FDF3D0"):isCustomCell?"#FEF9EC":!sh?C.surface:sh.work?C.primarySoft:isSickCode?"#F9E0E0":sh.absence?"#FDF3D0":C.lineSoft;
                   var csLabel=cs&&cs.startTime!=null?(hToHMS(cs.startTime)+"-"+hToHMS(cs.endTime)):null;
-                  return React.createElement("td",{key:d,style:Object.assign({},td,{padding:3,background:bg,outline:conflict?"2px solid "+C.tight:"none",outlineOffset:-2}),
+                  return React.createElement("td",{key:d,style:Object.assign({},td,{padding:3,background:bg,outline:conflict?"2px solid "+C.tight:"none",outlineOffset:-2,opacity:dayIsPast[i]?0.55:1}),
                     title:ab?"Absence":(isCustomCell&&cs&&cs.note?cs.note:conflict?"Availability conflict":(sh?sh.label:""))},
                     ab?React.createElement("span",{style:{fontWeight:700,fontSize:13,color:C.warn}},ab)
                       :editable?(
@@ -860,7 +870,8 @@ function PlanView(props){
 /* ================================================================== */
 function ForecastView(props){
   var state=props.state,sm=props.sm,setWeek=props.setWeek,setTab=props.setTab;
-  var planned=WEEKS.filter(function(w){return state.weeks[w.key]&&Object.values(state.weeks[w.key].assign||{}).some(function(a){return Object.keys(a).length;});});
+  var curIdx=currentWeekIndex();
+  var planned=WEEKS.filter(function(w,i){return i>=curIdx&&state.weeks[w.key]&&Object.values(state.weeks[w.key].assign||{}).some(function(a){return Object.keys(a).length;});});
   return React.createElement("section",null,
     React.createElement(Eyebrow,null,"Anticipate staffing needs"),
     React.createElement("h2",{style:{margin:"4px 0 4px",fontSize:19,fontWeight:700}},"Where the schedule gets tight"),
