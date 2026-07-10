@@ -198,6 +198,27 @@ function hoursFromTimes(s,e){if(!s||!e)return 0;var sh=s.split(":").map(Number),
 function hToHMS(h){if(h==null)return"";var hh=Math.floor(h),mm=Math.round((h-hh)*60);return String(hh).padStart(2,"0")+":"+String(mm).padStart(2,"0");}
 function hmsToH(t){if(!t)return null;var p=t.split(":");if(p.length<2)return null;return Number(p[0])+(Number(p[1])||0)/60;}
 function todayISO(){var d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");}
+function formatBerlin(isoString){
+  if(!isoString)return null;
+  try{
+    var d=new Date(isoString);
+    var opts={timeZone:"Europe/Berlin",day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit",hour12:false};
+    var parts=new Intl.DateTimeFormat("de-DE",opts).formatToParts(d);
+    var map={};parts.forEach(function(p){map[p.type]=p.value;});
+    return map.day+"."+map.month+"."+map.year+", "+map.hour+":"+map.minute;
+  }catch(e){return isoString;}
+}
+function formatBerlinDateOnly(isoString){
+  if(!isoString)return null;
+  try{
+    var d=new Date(isoString);
+    var opts={timeZone:"Europe/Berlin",day:"2-digit",month:"2-digit",year:"numeric"};
+    var parts=new Intl.DateTimeFormat("de-DE",opts).formatToParts(d);
+    var map={};parts.forEach(function(p){map[p.type]=p.value;});
+    return map.day+"."+map.month+"."+map.year;
+  }catch(e){return isoString;}
+}
+var APP_BUILD_TIME=typeof __APP_BUILD_TIME__!=="undefined"?__APP_BUILD_TIME__:null;
 function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,6);}
 function round(n){return Math.round(n*100)/100;}
 
@@ -332,15 +353,15 @@ function dayRequired(s,k,d){
 
 const hasStore=true;
 function loadState(){
-  var url=SUPABASE_URL+"/rest/v1/app_state?id=eq.main&select=data";
+  var url=SUPABASE_URL+"/rest/v1/app_state?id=eq.main&select=data,updated_at";
   return fetch(url,{
     headers:{
       "apikey":SUPABASE_ANON_KEY,
       "Authorization":"Bearer "+SUPABASE_ANON_KEY
     }
   }).then(function(r){if(!r.ok)throw new Error("HTTP "+r.status);return r.json();}).then(function(rows){
-    if(rows&&rows[0]&&rows[0].data) return rows[0].data;
-    return null;
+    if(rows&&rows[0]) return {data:rows[0].data||null,updatedAt:rows[0].updated_at||null};
+    return {data:null,updatedAt:null};
   });
 }
 function saveState(s){
@@ -351,10 +372,12 @@ function saveState(s){
       "apikey":SUPABASE_ANON_KEY,
       "Authorization":"Bearer "+SUPABASE_ANON_KEY,
       "Content-Type":"application/json",
-      "Prefer":"return=minimal"
+      "Prefer":"return=representation"
     },
     body:JSON.stringify({data:s})
-  }).then(function(r){if(!r.ok)throw new Error("HTTP "+r.status);return true;});
+  }).then(function(r){if(!r.ok)throw new Error("HTTP "+r.status);return r.json();}).then(function(rows){
+    return(rows&&rows[0]&&rows[0].updated_at)?rows[0].updated_at:null;
+  });
 }
 
 /* ---- UI primitives ---- */
@@ -397,6 +420,7 @@ export default function App(){
   var stateArr=useState(s0); var state=stateArr[0],setState=stateArr[1];
   var loadedArr=useState(false); var loaded=loadedArr[0],setLoaded=loadedArr[1];
   var syncArr=useState("connecting"); var syncStatus=syncArr[0],setSyncStatus=syncArr[1];
+  var lduArr=useState(null); var lastDataUpdate=lduArr[0],setLastDataUpdate=lduArr[1];
   var undoArr=useState([]); var undoStack=undoArr[0],setUndoStack=undoArr[1];
   var redoArr=useState([]); var redoStack=redoArr[0],setRedoStack=redoArr[1];
   // Absences undo/redo — separate from Weekly Plan history
@@ -407,8 +431,8 @@ export default function App(){
   var roleArr=useState("editor"); var role=roleArr[0],setRole=roleArr[1];
   var vpArr=useState(""); var viewerPid=vpArr[0],setViewerPid=vpArr[1];
 
-  useEffect(function(){loadState().then(function(s){if(s)setState(function(p){return Object.assign({},p,s,{settings:Object.assign({},DEFAULT_SETTINGS,s.settings||{}),absences:s.absences||[],timesheetLog:s.timesheetLog||[]});});setLoaded(true);setSyncStatus("connected");}).catch(function(e){console.warn("loadState failed:",e);setLoaded(true);setSyncStatus("error");});},[]);
-  useEffect(function(){if(!loaded)return;setSyncStatus("saving");saveState(state).then(function(){setSyncStatus("saved");}).catch(function(e){console.warn("saveState failed:",e);setSyncStatus("error");});},[state,loaded]);
+  useEffect(function(){loadState().then(function(res){var s=res.data;if(s)setState(function(p){return Object.assign({},p,s,{settings:Object.assign({},DEFAULT_SETTINGS,s.settings||{}),absences:s.absences||[],timesheetLog:s.timesheetLog||[]});});if(res.updatedAt)setLastDataUpdate(res.updatedAt);setLoaded(true);setSyncStatus("connected");}).catch(function(e){console.warn("loadState failed:",e);setLoaded(true);setSyncStatus("error");});},[]);
+  useEffect(function(){if(!loaded)return;setSyncStatus("saving");saveState(state).then(function(updatedAt){setSyncStatus("saved");if(updatedAt)setLastDataUpdate(updatedAt);}).catch(function(e){console.warn("saveState failed:",e);setSyncStatus("error");});},[state,loaded]);
   useEffect(function(){if(!viewerPid&&state.team.length){var p=state.team.find(function(x){return x.active;});if(p)setViewerPid(p.id);}},[state.team]);
 
   var editable=role==="editor";
@@ -572,9 +596,11 @@ export default function App(){
       tab==="next8"     && React.createElement(Next8View,{state:state,sm:sm,viewerPid:viewerPid,editable:editable}),
       tab==="setup"     && React.createElement(SetupView,{state:state,update:update,editable:editable,setState:setState})
     ),
-    React.createElement("footer",{style:{maxWidth:1200,margin:"0 auto",padding:"8px 24px 40px",color:C.faint,fontSize:12,display:"flex",alignItems:"center"}},
-      "Prototype · data saved in Supabase (shared cloud database)",
-      React.createElement(SyncBadge,{status:syncStatus})
+    React.createElement("footer",{style:{maxWidth:1200,margin:"0 auto",padding:"8px 24px 40px",color:C.faint,fontSize:12,display:"flex",alignItems:"center",flexWrap:"wrap",gap:"4px 10px"}},
+      React.createElement("span",null,"Developed by Natan Magalhães"),
+      APP_BUILD_TIME&&React.createElement("span",null,"· App updated: "+formatBerlinDateOnly(APP_BUILD_TIME)),
+      lastDataUpdate&&React.createElement("span",null,"· Data updated: "+formatBerlin(lastDataUpdate)),
+      React.createElement("span",{style:{display:"inline-flex",alignItems:"center"}},"· ",React.createElement(SyncBadge,{status:syncStatus}))
     )
   );
 }
@@ -711,7 +737,7 @@ function PlanView(props){
                 var dayDate=wkMo?new Date(wkMo):null;
                 if(dayDate)dayDate.setDate(wkMo.getDate()+i);
                 var ddmm=dayDate?(String(dayDate.getDate()).padStart(2,"0")+"/"+String(dayDate.getMonth()+1).padStart(2,"0")):"";
-                return React.createElement("th",{key:d,style:Object.assign({},th,{opacity:dayIsPast[i]?0.55:1})},d,
+                return React.createElement("th",{key:d,style:Object.assign({},th,{opacity:dayIsPast[i]?0.35:1})},d,
                   ddmm?React.createElement("div",{style:{fontSize:10,fontWeight:400,color:C.faint,marginTop:1}},ddmm):null
                 );
               }),
@@ -743,7 +769,7 @@ function PlanView(props){
                   var conflict=sh&&sh.work&&!isCustomCell&&availConflict(sh,availVal(p,d));
                   var isSickCode=sh&&sh.sick;var isNonSickAbsence=sh&&!sh.work&&!sh.sick&&!sh.work;var bg=ab?(sm[ab]&&sm[ab].sick?"#F9E0E0":"#FDF3D0"):isCustomCell?"#FEF9EC":!sh?C.surface:sh.work?C.primarySoft:isSickCode?"#F9E0E0":sh.absence?"#FDF3D0":C.lineSoft;
                   var csLabel=cs&&cs.startTime!=null?(hToHMS(cs.startTime)+"-"+hToHMS(cs.endTime)):null;
-                  return React.createElement("td",{key:d,style:Object.assign({},td,{padding:3,background:bg,outline:conflict?"2px solid "+C.tight:"none",outlineOffset:-2,opacity:dayIsPast[i]?0.55:1}),
+                  return React.createElement("td",{key:d,style:Object.assign({},td,{padding:3,background:bg,outline:conflict?"2px solid "+C.tight:"none",outlineOffset:-2,opacity:dayIsPast[i]?0.35:1}),
                     title:ab?"Absence":(isCustomCell&&cs&&cs.note?cs.note:conflict?"Availability conflict":(sh?sh.label:""))},
                     ab?React.createElement("span",{style:{fontWeight:700,fontSize:13,color:C.warn}},ab)
                       :editable?(
@@ -883,6 +909,13 @@ function ForecastView(props){
         var wBackup=(weekData(state,w.key).backupByDay)||{};
         var wTeamById={};state.team.forEach(function(p){wTeamById[p.id]=p;});
         var anyIssue=covs.some(function(c){return c.gap>0||!c.kitchenOk||!c.cleaningOk||c.parentOnly;});
+        var todayCut=new Date(todayISO()+"T00:00:00");
+        var wIsCurrent=(w.key===WEEKS[curIdx].key);
+        var wDayIsPast=DAYS.map(function(d,i){
+          if(!wIsCurrent)return false;
+          var dd=new Date(w.mo);dd.setDate(w.mo.getDate()+i);dd.setHours(0,0,0,0);
+          return dd<todayCut;
+        });
         return React.createElement("div",{key:w.key,style:{background:C.surface,border:"1px solid "+C.line,borderRadius:12,padding:"14px 16px"}},
           React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,flexWrap:"wrap"}},
             React.createElement("button",{onClick:function(){setWeek(w.key);setTab("plan");},style:linkBtn},React.createElement("b",{style:{fontSize:15}},w.kw)," ",React.createElement("span",{style:{color:C.muted,fontWeight:400}},"· "+w.range)),
@@ -891,7 +924,7 @@ function ForecastView(props){
           React.createElement("div",{style:{display:"flex",gap:8,marginTop:12,flexWrap:"wrap"}},
             covs.map(function(c,i){
               var recs=buildRecommendation(c,wBackup[DAYS[i]],[], wTeamById);
-              return React.createElement("div",{key:i,style:{flex:"1 1 110px",minWidth:110,borderRadius:9,padding:"8px 10px",background:recs.length?C.gapBg:C.okBg}},
+              return React.createElement("div",{key:i,style:{flex:"1 1 110px",minWidth:110,borderRadius:9,padding:"8px 10px",background:recs.length?C.gapBg:C.okBg,opacity:wDayIsPast[i]?0.35:1}},
                 React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between"}},React.createElement("span",{style:{fontWeight:700,fontSize:13}},DAYS[i]),React.createElement(StatusDot,{status:c.status})),
                 React.createElement("div",{style:{fontSize:12,marginTop:4,color:C.muted}},React.createElement("b",{style:{color:c.status==="gap"?C.gap:C.ink}},c.count),"/"+c.min+" with children"),
                 React.createElement("div",{style:{fontSize:11,marginTop:2}},React.createElement("span",{style:{color:c.kitchenOk?C.ok:C.gap}},"🍳"+(c.kitchenOk?"✓":"✗"))," ",React.createElement("span",{style:{color:c.cleaningOk?C.ok:C.gap}},"🧹"+(c.cleaningOk?"✓":"✗")),c.parentOnly?" ":""," ",c.parentOnly?React.createElement("span",{style:{color:C.gap,fontWeight:700}},"👨‍👩‍👧 no educator!"):""),
@@ -916,7 +949,7 @@ function ForecastView(props){
               DAYS.map(function(d,di){
                 var slots=buildDayGantt(state,sm,w.key,d);
                 var cv=covs[di];
-                return React.createElement("div",{key:d,style:{background:C.surface,border:"1px solid "+(cv.status==="gap"?C.gap:cv.status==="tight"?C.tight:C.line),borderRadius:8,padding:"7px 8px"}},
+                return React.createElement("div",{key:d,style:{background:C.surface,border:"1px solid "+(cv.status==="gap"?C.gap:cv.status==="tight"?C.tight:C.line),borderRadius:8,padding:"7px 8px",opacity:wDayIsPast[di]?0.35:1}},
                   React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:4}},
                     React.createElement("span",{style:{fontWeight:700,fontSize:11}},d),
                     React.createElement(StatusDot,{status:cv.status})
