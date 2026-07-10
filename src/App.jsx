@@ -1,13 +1,12 @@
 import React from "react";
-const { useState, useEffect, useMemo, useCallback } = React;
+const { useState, useEffect, useMemo, useCallback, useRef } = React;
+import { supabase } from "./supabaseClient.js";
 
 /* ================================================================== *
  * Kita 30 Lobitos — Shift Plan v5
  * ================================================================== */
 
 const STORAGE_KEY = "kita30-dienstplan-v8";
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 const DAYS = ["Mon","Tue","Wed","Thu","Fri"];
 const DAY_NAMES = {Mon:"Monday",Tue:"Tuesday",Wed:"Wednesday",Thu:"Thursday",Fri:"Friday"};
 
@@ -353,30 +352,15 @@ function dayRequired(s,k,d){
 
 const hasStore=true;
 function loadState(){
-  var url=SUPABASE_URL+"/rest/v1/app_state?id=eq.main&select=data,updated_at";
-  return fetch(url,{
-    headers:{
-      "apikey":SUPABASE_ANON_KEY,
-      "Authorization":"Bearer "+SUPABASE_ANON_KEY
-    }
-  }).then(function(r){if(!r.ok)throw new Error("HTTP "+r.status);return r.json();}).then(function(rows){
-    if(rows&&rows[0]) return {data:rows[0].data||null,updatedAt:rows[0].updated_at||null};
-    return {data:null,updatedAt:null};
+  return supabase.from("app_state").select("data,updated_at").eq("id","main").single().then(function(res){
+    if(res.error)throw res.error;
+    return {data:res.data?res.data.data:null,updatedAt:res.data?res.data.updated_at:null};
   });
 }
 function saveState(s){
-  var url=SUPABASE_URL+"/rest/v1/app_state?id=eq.main";
-  return fetch(url,{
-    method:"PATCH",
-    headers:{
-      "apikey":SUPABASE_ANON_KEY,
-      "Authorization":"Bearer "+SUPABASE_ANON_KEY,
-      "Content-Type":"application/json",
-      "Prefer":"return=representation"
-    },
-    body:JSON.stringify({data:s})
-  }).then(function(r){if(!r.ok)throw new Error("HTTP "+r.status);return r.json();}).then(function(rows){
-    return(rows&&rows[0]&&rows[0].updated_at)?rows[0].updated_at:null;
+  return supabase.from("app_state").update({data:s}).eq("id","main").select("updated_at").single().then(function(res){
+    if(res.error)throw res.error;
+    return res.data?res.data.updated_at:null;
   });
 }
 
@@ -398,6 +382,77 @@ function SyncBadge(props){
   return React.createElement("span",{style:{display:"inline-flex",alignItems:"center",gap:6,marginLeft:10}},
     React.createElement("span",{style:{display:"inline-block",width:8,height:8,borderRadius:8,background:m.color,flexShrink:0}}),
     React.createElement("span",null,m.label)
+  );
+}
+
+function LoginScreen(){
+  var emailArr=useState(""); var email=emailArr[0],setEmail=emailArr[1];
+  var pwArr=useState(""); var password=pwArr[0],setPassword=pwArr[1];
+  var loadingArr=useState(null); var loadingType=loadingArr[0],setLoadingType=loadingArr[1];
+  var msgArr=useState(null); var msg=msgArr[0],setMsg=msgArr[1];
+
+  function handlePasswordSignIn(e){
+    e.preventDefault();
+    setMsg(null);
+    if(!email||!password){setMsg({type:"error",text:"Please enter both email and password."});return;}
+    setLoadingType("password");
+    supabase.auth.signInWithPassword({email:email,password:password}).then(function(res){
+      setLoadingType(null);
+      if(res.error){setMsg({type:"error",text:"Invalid email or password."});return;}
+      // success: onAuthStateChange in App() picks up the new session automatically
+    }).catch(function(){
+      setLoadingType(null);
+      setMsg({type:"error",text:"Invalid email or password."});
+    });
+  }
+
+  function handleMagicLink(e){
+    e.preventDefault();
+    setMsg(null);
+    if(!email){setMsg({type:"error",text:"Please enter your email address first."});return;}
+    setLoadingType("magiclink");
+    supabase.auth.signInWithOtp({
+      email:email,
+      options:{shouldCreateUser:false,emailRedirectTo:window.location.origin}
+    }).then(function(res){
+      setLoadingType(null);
+      if(res.error){
+        console.warn("signInWithOtp error:",res.error);
+        var status=res.error.status;
+        if(status&&(status>=500||status===429)){
+          setMsg({type:"error",text:"Could not send the login link right now. Please try again."});
+          return;
+        }
+      }
+      setMsg({type:"success",text:"If that email is registered, a sign-in link has been sent. Check your inbox."});
+    }).catch(function(e){
+      console.warn("signInWithOtp failed:",e);
+      setLoadingType(null);
+      setMsg({type:"error",text:"Could not send the login link right now. Please try again."});
+    });
+  }
+
+  return React.createElement("div",{style:{fontFamily:FONT,minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:C.bg,padding:20}},
+    React.createElement("div",{style:{width:"100%",maxWidth:380,background:C.surface,border:"1px solid "+C.line,borderRadius:14,padding:"28px 26px",boxShadow:"0 2px 10px rgba(0,0,0,.04)"}},
+      React.createElement(Eyebrow,null,"Kita 30 Lobitos · parent initiative"),
+      React.createElement("h1",{style:{margin:"4px 0 18px",fontSize:21,fontWeight:800,letterSpacing:"-.02em"}},"Sign in to Shift Plan"),
+      React.createElement("form",{onSubmit:handlePasswordSignIn,style:{display:"flex",flexDirection:"column",gap:12}},
+        React.createElement(Field,{label:"Email"},
+          React.createElement("input",{type:"email",value:email,autoComplete:"email",onChange:function(e){setEmail(e.target.value);},style:txtInput})
+        ),
+        React.createElement(Field,{label:"Password"},
+          React.createElement("input",{type:"password",value:password,autoComplete:"current-password",onChange:function(e){setPassword(e.target.value);},style:txtInput})
+        ),
+        React.createElement("button",{type:"submit",disabled:loadingType==="password",style:Object.assign({},btnStyle,{background:C.primary,color:"#fff",borderColor:C.primary,opacity:loadingType==="password"?0.6:1})},loadingType==="password"?"Signing in...":"Sign in")
+      ),
+      React.createElement("div",{style:{display:"flex",alignItems:"center",gap:10,margin:"18px 0"}},
+        React.createElement("div",{style:{flex:1,height:1,background:C.line}}),
+        React.createElement("span",{style:{fontSize:12,color:C.faint}},"or"),
+        React.createElement("div",{style:{flex:1,height:1,background:C.line}})
+      ),
+      React.createElement("button",{onClick:handleMagicLink,disabled:loadingType==="magiclink",style:Object.assign({},btnStyle,{width:"100%",opacity:loadingType==="magiclink"?0.6:1})},loadingType==="magiclink"?"Sending...":"Send magic link"),
+      msg && React.createElement("div",{style:{marginTop:14,fontSize:13,color:msg.type==="error"?C.gap:C.ok}},msg.text)
+    )
   );
 }
 
@@ -431,8 +486,72 @@ export default function App(){
   var roleArr=useState("editor"); var role=roleArr[0],setRole=roleArr[1];
   var vpArr=useState(""); var viewerPid=vpArr[0],setViewerPid=vpArr[1];
 
-  useEffect(function(){loadState().then(function(res){var s=res.data;if(s)setState(function(p){return Object.assign({},p,s,{settings:Object.assign({},DEFAULT_SETTINGS,s.settings||{}),absences:s.absences||[],timesheetLog:s.timesheetLog||[]});});if(res.updatedAt)setLastDataUpdate(res.updatedAt);setLoaded(true);setSyncStatus("connected");}).catch(function(e){console.warn("loadState failed:",e);setLoaded(true);setSyncStatus("error");});},[]);
-  useEffect(function(){if(!loaded)return;setSyncStatus("saving");saveState(state).then(function(updatedAt){setSyncStatus("saved");if(updatedAt)setLastDataUpdate(updatedAt);}).catch(function(e){console.warn("saveState failed:",e);setSyncStatus("error");});},[state,loaded]);
+  var sessionArr=useState(null); var session=sessionArr[0],setSession=sessionArr[1];
+  var authLoadingArr=useState(true); var authLoading=authLoadingArr[0],setAuthLoading=authLoadingArr[1];
+  var remoteLoadedArr=useState(false); var remoteLoadedSuccessfully=remoteLoadedArr[0],setRemoteLoadedSuccessfully=remoteLoadedArr[1];
+  var skipNextSaveRef=useRef(true);
+  var userId=session&&session.user?session.user.id:null;
+
+  useEffect(function(){
+    var mounted=true;
+    supabase.auth.getSession().then(function(res){
+      if(!mounted)return;
+      setSession(res.data?res.data.session:null);
+      setAuthLoading(false);
+    }).catch(function(e){
+      console.warn("getSession failed:",e);
+      if(!mounted)return;
+      setSession(null);
+      setAuthLoading(false);
+    });
+    var listener=supabase.auth.onAuthStateChange(function(event,newSession){
+      setSession(newSession);
+      if(!newSession){
+        setLoaded(false);
+        setRemoteLoadedSuccessfully(false);
+        setSyncStatus("connecting");
+        skipNextSaveRef.current=true;
+      }
+    });
+    return function(){mounted=false;listener.data.subscription.unsubscribe();};
+  },[]);
+
+  useEffect(function(){
+    if(!userId)return;
+    setSyncStatus("connecting");
+    loadState().then(function(res){
+      var s=res.data;
+      if(!s||typeof s!=="object"||!s.team||!s.weeks||!s.shifts||!s.settings){
+        throw new Error("Invalid or empty app_state data");
+      }
+      skipNextSaveRef.current=true;
+      setState(function(p){return Object.assign({},p,s,{settings:Object.assign({},DEFAULT_SETTINGS,s.settings||{}),absences:s.absences||[],timesheetLog:s.timesheetLog||[]});});
+      if(res.updatedAt)setLastDataUpdate(res.updatedAt);
+      setRemoteLoadedSuccessfully(true);
+      setLoaded(true);
+      setSyncStatus("connected");
+    }).catch(function(e){
+      console.warn("loadState failed:",e);
+      setLoaded(true);
+      setRemoteLoadedSuccessfully(false);
+      setSyncStatus("error");
+    });
+  },[userId]);
+  useEffect(function(){
+    if(!userId||!remoteLoadedSuccessfully)return;
+    if(skipNextSaveRef.current){
+      skipNextSaveRef.current=false;
+      return;
+    }
+    setSyncStatus("saving");
+    saveState(state).then(function(updatedAt){
+      setSyncStatus("saved");
+      if(updatedAt)setLastDataUpdate(updatedAt);
+    }).catch(function(e){
+      console.warn("saveState failed:",e);
+      setSyncStatus("error");
+    });
+  },[state,userId,remoteLoadedSuccessfully]);
   useEffect(function(){if(!viewerPid&&state.team.length){var p=state.team.find(function(x){return x.active;});if(p)setViewerPid(p.id);}},[state.team]);
 
   var editable=role==="editor";
@@ -441,6 +560,22 @@ export default function App(){
 
   var sm=useMemo(function(){return shiftMap(state.shifts);},[state.shifts]);
   var update=useCallback(function(fn){setState(function(prev){return fn(JSON.parse(JSON.stringify(prev)));});},[]);
+
+  if(authLoading){
+    return React.createElement("div",{style:{fontFamily:FONT,minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",color:C.muted}},"Loading...");
+  }
+  if(!session){
+    return React.createElement(LoginScreen,null);
+  }
+  if(!remoteLoadedSuccessfully&&syncStatus==="error"){
+    return React.createElement("div",{style:{fontFamily:FONT,minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",color:C.gap,gap:12}},
+      React.createElement("div",null,"Connection error — could not load data from Supabase."),
+      React.createElement("button",{onClick:function(){window.location.reload();},style:btnStyle},"Retry")
+    );
+  }
+  if(!remoteLoadedSuccessfully){
+    return React.createElement("div",{style:{fontFamily:FONT,minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",color:C.muted}},"Loading data...");
+  }
   // absUpdate: like update but snapshots state.absences before changing
   function absUpdate(fn){
     setState(function(prev){
@@ -578,7 +713,9 @@ export default function App(){
           ),
           React.createElement("select",{disabled:true,style:Object.assign({},selStyle,{padding:"5px 8px",fontSize:12.5})},
             React.createElement("option",null,"EN"),React.createElement("option",null,"DE — soon")
-          )
+          ),
+          React.createElement("span",{style:{fontSize:12,color:C.faint}},session.user.email),
+          React.createElement("button",{onClick:function(){supabase.auth.signOut();},style:Object.assign({},btnStyle,{padding:"6px 12px",fontSize:12.5})},"Sign out")
         )
       ),
       React.createElement("div",{style:{maxWidth:1200,margin:"0 auto",padding:"0 24px 12px"}},
