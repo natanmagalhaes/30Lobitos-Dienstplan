@@ -467,7 +467,7 @@ const numInput={fontFamily:FONT,width:56,fontSize:13,padding:"5px 6px",borderRad
 const txtInput={fontFamily:FONT,fontSize:13,padding:"5px 8px",borderRadius:6,border:"1px solid "+C.line,boxSizing:"border-box"};
 const emptyBox={background:C.surface,border:"1px dashed "+C.line,borderRadius:12,padding:"28px 20px",color:C.muted,textAlign:"center",fontSize:14};
 
-const TABS_EDITOR=[["plan","Weekly plan"],["forecast","Coverage forecast"],["absences","Absences"],["balances","Leave & Time Balance"],["timesheet","Timesheet"],["next8","Next 8 weeks"],["setup","Team & Shifts"]];
+const TABS_EDITOR=[["plan","Weekly plan"],["forecast","Coverage"],["absences","Absences"],["balances","Leave & Time Balance"],["timesheet","Timesheet"],["next8","Next 8 weeks"],["setup","Team & Shifts"]];
 const TABS_VIEWER=[["absences","Submit absence"],["timesheet","My timesheet"],["next8","Next 8 weeks"]];
 
 export default function App(){
@@ -1117,6 +1117,7 @@ function AbsencesView(props){
   var etArr=useState(""); var editType=etArr[0],setEditType=etArr[1];
   var afpArr=useState("all"); var filterPid=afpArr[0],setFilterPid=afpArr[1];
   var afcArr=useState("all"); var filterCat=afcArr[0],setFilterCat=afcArr[1];
+  var aftArr=useState("upcoming"); var timeFilter=aftArr[0],setTimeFilter=aftArr[1];
 
   function addAbsences(){
     var start=new Date(dateFrom+"T12:00:00"),end=new Date(dateTo+"T12:00:00");
@@ -1181,6 +1182,12 @@ function AbsencesView(props){
     });
   });
   var list=rawAbs.concat(planDerived).slice().sort(function(a,b){return a.date.localeCompare(b.date);});
+  var todayStr=todayISO();
+  list=list.filter(function(a){
+    if(timeFilter==="upcoming")return a.date>=todayStr;
+    if(timeFilter==="past")return a.date<todayStr;
+    return true;
+  });
 
   return React.createElement("section",null,
     React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10,marginBottom:4}},
@@ -1211,6 +1218,11 @@ function AbsencesView(props){
           React.createElement("option",{value:"all"},"All categories"),
           React.createElement("option",{value:"krank"},"Krank (sick)"),
           React.createElement("option",{value:"nicht_krank"},"Nicht krank (other)")
+        ),
+        React.createElement("select",{value:timeFilter,onChange:function(e){setTimeFilter(e.target.value);},style:Object.assign({},selStyle,{padding:"5px 8px",fontSize:12.5})},
+          React.createElement("option",{value:"upcoming"},"Upcoming"),
+          React.createElement("option",{value:"past"},"Past"),
+          React.createElement("option",{value:"all"},"All")
         )
       ),
       React.createElement("div",{style:{background:C.surface,border:"1px solid "+C.line,borderRadius:12,overflow:"hidden"}},
