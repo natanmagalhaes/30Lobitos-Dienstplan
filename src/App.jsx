@@ -467,8 +467,7 @@ const numInput={fontFamily:FONT,width:56,fontSize:13,padding:"5px 6px",borderRad
 const txtInput={fontFamily:FONT,fontSize:13,padding:"5px 8px",borderRadius:6,border:"1px solid "+C.line,boxSizing:"border-box"};
 const emptyBox={background:C.surface,border:"1px dashed "+C.line,borderRadius:12,padding:"28px 20px",color:C.muted,textAlign:"center",fontSize:14};
 
-const TABS_EDITOR=[["plan","Weekly plan"],["forecast","Coverage"],["absences","Absences"],["balances","Leave & Time Balance"],["timesheet","Timesheet"],["next8","Next 8 weeks"],["setup","Team & Shifts"]];
-const TABS_VIEWER=[["absences","Submit absence"],["timesheet","My timesheet"],["next8","Next 8 weeks"]];
+const ALL_SECTIONS=[["plan","Weekly plan"],["forecast","Coverage"],["absences","Absences"],["balances","Leave & Time Balance"],["timesheet","Timesheet"],["next8","Next 8 weeks"],["setup","Team & Shifts"]];
 
 export default function App(){
   var s0={team:DEFAULT_TEAM,shifts:DEFAULT_SHIFTS,weeks:{},settings:DEFAULT_SETTINGS,absences:[],timesheetLog:[]};
@@ -483,8 +482,9 @@ export default function App(){
   var absRedoArr=useState([]); var absRedoStack=absRedoArr[0],setAbsRedoStack=absRedoArr[1];
   var tabArr=useState("plan"); var tab=tabArr[0],setTab=tabArr[1];
   var weekArr=useState(DEFAULT_WEEK); var week=weekArr[0],setWeek=weekArr[1];
-  var roleArr=useState("editor"); var role=roleArr[0],setRole=roleArr[1];
   var vpArr=useState(""); var viewerPid=vpArr[0],setViewerPid=vpArr[1];
+  var previewRoleArr=useState("dev"); var previewRole=previewRoleArr[0],setPreviewRole=previewRoleArr[1];
+  var rolePermsArr=useState(null); var rolePerms=rolePermsArr[0],setRolePerms=rolePermsArr[1];
 
   var APP_STATE_ROLES=["dev","admin","dienstplan","leitung","ed_team"];
 
@@ -554,6 +554,19 @@ export default function App(){
   },[userId]);
 
   useEffect(function(){
+    if(!userId){setRolePerms(null);return;}
+    supabase.from("role_permissions").select("role_id,section_id,can_view,can_edit").then(function(res){
+      if(res.error){console.warn("role_permissions fetch failed:",res.error);setRolePerms(null);return;}
+      var map={};
+      (res.data||[]).forEach(function(row){
+        if(!map[row.role_id])map[row.role_id]={};
+        map[row.role_id][row.section_id]={can_view:row.can_view,can_edit:row.can_edit};
+      });
+      setRolePerms(map);
+    }).catch(function(e){console.warn("role_permissions fetch failed:",e);setRolePerms(null);});
+  },[userId]);
+
+  useEffect(function(){
     if(!userId||!profileCanAccessApp)return;
     setSyncStatus("connecting");
     loadState().then(function(res){
@@ -591,9 +604,16 @@ export default function App(){
   },[state,userId,profileCanAccessApp,remoteLoadedSuccessfully]);
   useEffect(function(){if(!viewerPid&&state.team.length){var p=state.team.find(function(x){return x.active;});if(p)setViewerPid(p.id);}},[state.team]);
 
-  var editable=role==="editor";
-  var tabs=editable?TABS_EDITOR:TABS_VIEWER;
-  useEffect(function(){if(!tabs.some(function(t){return t[0]===tab;}))setTab(tabs[0][0]);},[role]);
+  var isDevUser=!!(profile&&profile.role_id==="dev");
+  var effectiveRoleId=isDevUser?previewRole:(profile?profile.role_id:null);
+  function sectionPerm(sectionId){
+    if(!rolePerms||!effectiveRoleId)return {can_view:false,can_edit:false};
+    var r=rolePerms[effectiveRoleId];
+    if(!r||!r[sectionId])return {can_view:false,can_edit:false};
+    return r[sectionId];
+  }
+  var tabs=ALL_SECTIONS.filter(function(s){return sectionPerm(s[0]).can_view;});
+  useEffect(function(){if(tabs.length&&!tabs.some(function(t){return t[0]===tab;}))setTab(tabs[0][0]);},[effectiveRoleId,rolePerms]);
 
   var sm=useMemo(function(){return shiftMap(state.shifts);},[state.shifts]);
   var update=useCallback(function(fn){setState(function(prev){return fn(JSON.parse(JSON.stringify(prev)));});},[]);
@@ -627,6 +647,9 @@ export default function App(){
       React.createElement("div",null,"Team access is not available yet."),
       React.createElement("button",{onClick:function(){supabase.auth.signOut();},style:btnStyle},"Sign out")
     );
+  }
+  if(!rolePerms){
+    return React.createElement("div",{style:{fontFamily:FONT,minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",color:C.muted}},"Loading permissions...");
   }
   if(!remoteLoadedSuccessfully&&syncStatus==="error"){
     return React.createElement("div",{style:{fontFamily:FONT,minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",color:C.gap,gap:12}},
@@ -761,15 +784,15 @@ export default function App(){
           React.createElement("h1",{style:{margin:"2px 0 0",fontSize:25,fontWeight:800,letterSpacing:"-.02em"}},"Shift Plan")
         ),
         React.createElement("div",{style:{display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}},
-          !editable && React.createElement(Field,{label:"You are"},
+          effectiveRoleId==="team" && React.createElement(Field,{label:"You are"},
             React.createElement("select",{value:viewerPid,onChange:function(e){setViewerPid(e.target.value);},style:Object.assign({},selStyle,{padding:"5px 8px",fontSize:12.5})},
               state.team.filter(function(p){return p.active;}).map(function(p){return React.createElement("option",{key:p.id,value:p.id},p.name);})
             )
           ),
-          React.createElement("div",{style:{display:"flex",alignItems:"center",gap:6,fontSize:12.5,color:C.muted}},
-            React.createElement("span",null,"View as"),
-            React.createElement("div",{style:{display:"flex",background:C.bg,borderRadius:8,padding:3}},
-              [["editor","Editor"],["viewer","Team member"]].map(function(kl){return React.createElement("button",{key:kl[0],onClick:function(){setRole(kl[0]);},style:{border:"none",cursor:"pointer",borderRadius:6,padding:"5px 10px",fontFamily:FONT,fontSize:12.5,fontWeight:600,background:role===kl[0]?C.surface:"transparent",color:role===kl[0]?C.primaryDark:C.muted}},kl[1]);})
+          isDevUser && React.createElement("div",{style:{display:"flex",alignItems:"center",gap:6,fontSize:12.5,color:C.muted}},
+            React.createElement("span",null,"Preview as"),
+            React.createElement("select",{value:previewRole,onChange:function(e){setPreviewRole(e.target.value);},style:Object.assign({},selStyle,{padding:"5px 8px",fontSize:12.5})},
+              [["dev","Dev"],["admin","Admin"],["dienstplan","Dienstplan"],["leitung","Leitung"],["ed_team","ED Team"],["team","Team"]].map(function(o){return React.createElement("option",{key:o[0],value:o[0]},o[1]);})
             )
           ),
           React.createElement("select",{disabled:true,style:Object.assign({},selStyle,{padding:"5px 8px",fontSize:12.5})},
@@ -783,16 +806,17 @@ export default function App(){
         React.createElement("nav",{style:{display:"flex",gap:4,background:C.bg,padding:4,borderRadius:10,width:"fit-content",flexWrap:"wrap"}},
           tabs.map(function(kl){return React.createElement("button",{key:kl[0],onClick:function(){setTab(kl[0]);},style:{border:"none",cursor:"pointer",borderRadius:7,padding:"8px 14px",fontSize:13.5,fontWeight:600,fontFamily:FONT,background:tab===kl[0]?C.surface:"transparent",color:tab===kl[0]?C.primaryDark:C.muted,boxShadow:tab===kl[0]?"0 1px 2px rgba(0,0,0,.08)":"none"}},kl[1]);})
         )
-      )
+      ),
+      isDevUser&&previewRole!=="dev"&&React.createElement("div",{style:{background:C.tightBg,color:C.tight,fontSize:12.5,fontWeight:700,textAlign:"center",padding:"6px 12px"}},"Preview mode: "+previewRole)
     ),
     React.createElement("main",{style:{maxWidth:1200,margin:"0 auto",padding:"22px 24px"}},
-      tab==="plan"      && React.createElement(PlanView,{state:state,sm:sm,week:week,setWeek:setWeek,wkIdx:wkIdx,prevWeek:prevWeek,nextWeek:nextWeek,editable:editable,setCell:setCell,setNote:setNote,setAdj:setAdj,setMinOverride:setMinOverride,setU3Ov:setU3Ov,setOver3Ov:setOver3Ov,setBackupWeek:setBackupWeek,setCustomShift:setCustomShift,toggleWeek:toggleWeek,planUndo:planUndo,planRedo:planRedo,undoStack:undoStack,redoStack:redoStack}),
+      tab==="plan"      && React.createElement(PlanView,{state:state,sm:sm,week:week,setWeek:setWeek,wkIdx:wkIdx,prevWeek:prevWeek,nextWeek:nextWeek,editable:sectionPerm("plan").can_edit,setCell:setCell,setNote:setNote,setAdj:setAdj,setMinOverride:setMinOverride,setU3Ov:setU3Ov,setOver3Ov:setOver3Ov,setBackupWeek:setBackupWeek,setCustomShift:setCustomShift,toggleWeek:toggleWeek,planUndo:planUndo,planRedo:planRedo,undoStack:undoStack,redoStack:redoStack}),
       tab==="forecast"  && React.createElement(ForecastView,{state:state,sm:sm,setWeek:setWeek,setTab:setTab}),
-      tab==="absences"  && React.createElement(AbsencesView,{state:state,sm:sm,update:absUpdate,editable:editable,viewerPid:viewerPid,absUndo:absUndo,absRedo:absRedo,absUndoStack:absUndoStack,absRedoStack:absRedoStack}),
-      tab==="balances"  && React.createElement(BalancesView,{state:state,sm:sm,update:update,editable:editable}),
-      tab==="timesheet" && React.createElement(TimesheetView,{state:state,sm:sm,update:update,editable:editable,viewerPid:viewerPid}),
-      tab==="next8"     && React.createElement(Next8View,{state:state,sm:sm,viewerPid:viewerPid,editable:editable}),
-      tab==="setup"     && React.createElement(SetupView,{state:state,update:update,editable:editable,setState:setState})
+      tab==="absences"  && React.createElement(AbsencesView,{state:state,sm:sm,update:absUpdate,editable:sectionPerm("absences").can_edit,viewerPid:viewerPid,absUndo:absUndo,absRedo:absRedo,absUndoStack:absUndoStack,absRedoStack:absRedoStack}),
+      tab==="balances"  && React.createElement(BalancesView,{state:state,sm:sm,update:update,editable:sectionPerm("balances").can_edit}),
+      tab==="timesheet" && React.createElement(TimesheetView,{state:state,sm:sm,update:update,editable:sectionPerm("timesheet").can_edit,viewerPid:viewerPid}),
+      tab==="next8"     && React.createElement(Next8View,{state:state,sm:sm,viewerPid:viewerPid,editable:sectionPerm("next8").can_edit}),
+      tab==="setup"     && React.createElement(SetupView,{state:state,update:update,editable:sectionPerm("setup").can_edit,setState:setState})
     ),
     React.createElement("footer",{style:{maxWidth:1200,margin:"0 auto",padding:"8px 24px 40px",color:C.faint,fontSize:12,display:"flex",alignItems:"center",flexWrap:"wrap",gap:"4px 10px"}},
       React.createElement("span",null,"Developed by Natan Magalhães"),
