@@ -486,11 +486,19 @@ export default function App(){
   var roleArr=useState("editor"); var role=roleArr[0],setRole=roleArr[1];
   var vpArr=useState(""); var viewerPid=vpArr[0],setViewerPid=vpArr[1];
 
+  var APP_STATE_ROLES=["dev","admin","dienstplan","leitung","ed_team"];
+
   var sessionArr=useState(null); var session=sessionArr[0],setSession=sessionArr[1];
   var authLoadingArr=useState(true); var authLoading=authLoadingArr[0],setAuthLoading=authLoadingArr[1];
   var remoteLoadedArr=useState(false); var remoteLoadedSuccessfully=remoteLoadedArr[0],setRemoteLoadedSuccessfully=remoteLoadedArr[1];
   var skipNextSaveRef=useRef(true);
   var userId=session&&session.user?session.user.id:null;
+
+  // profile: undefined = still checking, null = no active profile found, object = valid profile
+  var profileArr=useState(undefined); var profile=profileArr[0],setProfile=profileArr[1];
+  var profileErrorArr=useState(false); var profileError=profileErrorArr[0],setProfileError=profileErrorArr[1];
+  var profileFetchIdRef=useRef(0);
+  var profileCanAccessApp=!!(profile&&profile.active&&APP_STATE_ROLES.indexOf(profile.role_id)>=0);
 
   useEffect(function(){
     var mounted=true;
@@ -516,8 +524,37 @@ export default function App(){
     return function(){mounted=false;listener.data.subscription.unsubscribe();};
   },[]);
 
+  // profiles.email is informational only — never used for authorization. If a user's
+  // email is later changed in Supabase Auth, this stored copy does NOT update on its own;
+  // for now it would need a manual SQL correction (profiles.email is locked against UPDATE).
   useEffect(function(){
+    var fetchId=++profileFetchIdRef.current;
+    setProfile(undefined);
+    setProfileError(false);
+    setLoaded(false);
+    setRemoteLoadedSuccessfully(false);
+    skipNextSaveRef.current=true;
     if(!userId)return;
+    supabase.from("profiles").select("*").eq("user_id",userId).maybeSingle().then(function(res){
+      if(fetchId!==profileFetchIdRef.current)return; // a newer request has since started; ignore this stale one
+      if(res.error){
+        console.warn("profile fetch failed:",res.error);
+        setProfileError(true);
+        setProfile(null);
+        return;
+      }
+      if(!res.data||!res.data.active){setProfile(null);return;}
+      setProfile(res.data);
+    }).catch(function(e){
+      if(fetchId!==profileFetchIdRef.current)return;
+      console.warn("profile fetch failed:",e);
+      setProfileError(true);
+      setProfile(null);
+    });
+  },[userId]);
+
+  useEffect(function(){
+    if(!userId||!profileCanAccessApp)return;
     setSyncStatus("connecting");
     loadState().then(function(res){
       var s=res.data;
@@ -536,9 +573,9 @@ export default function App(){
       setRemoteLoadedSuccessfully(false);
       setSyncStatus("error");
     });
-  },[userId]);
+  },[userId,profileCanAccessApp]);
   useEffect(function(){
-    if(!userId||!remoteLoadedSuccessfully)return;
+    if(!userId||!profileCanAccessApp||!remoteLoadedSuccessfully)return;
     if(skipNextSaveRef.current){
       skipNextSaveRef.current=false;
       return;
@@ -551,7 +588,7 @@ export default function App(){
       console.warn("saveState failed:",e);
       setSyncStatus("error");
     });
-  },[state,userId,remoteLoadedSuccessfully]);
+  },[state,userId,profileCanAccessApp,remoteLoadedSuccessfully]);
   useEffect(function(){if(!viewerPid&&state.team.length){var p=state.team.find(function(x){return x.active;});if(p)setViewerPid(p.id);}},[state.team]);
 
   var editable=role==="editor";
@@ -566,6 +603,30 @@ export default function App(){
   }
   if(!session){
     return React.createElement(LoginScreen,null);
+  }
+  if(profile===undefined){
+    return React.createElement("div",{style:{fontFamily:FONT,minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",color:C.muted}},"Checking access...");
+  }
+  if(profileError){
+    return React.createElement("div",{style:{fontFamily:FONT,minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",color:C.gap,gap:14}},
+      React.createElement("div",null,"Could not check access."),
+      React.createElement("div",{style:{display:"flex",gap:10}},
+        React.createElement("button",{onClick:function(){window.location.reload();},style:btnStyle},"Retry"),
+        React.createElement("button",{onClick:function(){supabase.auth.signOut();},style:btnStyle},"Sign out")
+      )
+    );
+  }
+  if(profile===null){
+    return React.createElement("div",{style:{fontFamily:FONT,minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",color:C.muted,gap:14}},
+      React.createElement("div",null,"Access pending — contact your administrator."),
+      React.createElement("button",{onClick:function(){supabase.auth.signOut();},style:btnStyle},"Sign out")
+    );
+  }
+  if(!profileCanAccessApp){
+    return React.createElement("div",{style:{fontFamily:FONT,minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",color:C.muted,gap:14}},
+      React.createElement("div",null,"Team access is not available yet."),
+      React.createElement("button",{onClick:function(){supabase.auth.signOut();},style:btnStyle},"Sign out")
+    );
   }
   if(!remoteLoadedSuccessfully&&syncStatus==="error"){
     return React.createElement("div",{style:{fontFamily:FONT,minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",color:C.gap,gap:12}},
@@ -714,7 +775,7 @@ export default function App(){
           React.createElement("select",{disabled:true,style:Object.assign({},selStyle,{padding:"5px 8px",fontSize:12.5})},
             React.createElement("option",null,"EN"),React.createElement("option",null,"DE — soon")
           ),
-          React.createElement("span",{style:{fontSize:12,color:C.faint}},session.user.email),
+          React.createElement("span",{style:{fontSize:12,color:C.faint}},session.user.email+(profile&&profile.role_id?" · "+profile.role_id:"")),
           React.createElement("button",{onClick:function(){supabase.auth.signOut();},style:Object.assign({},btnStyle,{padding:"6px 12px",fontSize:12.5})},"Sign out")
         )
       ),
