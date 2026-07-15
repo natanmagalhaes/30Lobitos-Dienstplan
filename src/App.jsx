@@ -467,7 +467,7 @@ const numInput={fontFamily:FONT,width:56,fontSize:13,padding:"5px 6px",borderRad
 const txtInput={fontFamily:FONT,fontSize:13,padding:"5px 8px",borderRadius:6,border:"1px solid "+C.line,boxSizing:"border-box"};
 const emptyBox={background:C.surface,border:"1px dashed "+C.line,borderRadius:12,padding:"28px 20px",color:C.muted,textAlign:"center",fontSize:14};
 
-const ALL_SECTIONS=[["plan","Weekly plan"],["forecast","Coverage"],["absences","Absences"],["balances","Leave & Time Balance"],["timesheet","Timesheet"],["next8","Next 8 weeks"],["setup","Team & Shifts"]];
+const ALL_SECTIONS=[["plan","Weekly plan"],["forecast","Coverage"],["absences","Absences"],["balances","Leave & Time Balance"],["timesheet","Timesheet"],["next8","Next 8 weeks"],["setup","Team & Shifts"],["admin","Admin"],["dev","Dev"]];
 
 export default function App(){
   var s0={team:DEFAULT_TEAM,shifts:DEFAULT_SHIFTS,weeks:{},settings:DEFAULT_SETTINGS,absences:[],timesheetLog:[]};
@@ -816,7 +816,16 @@ export default function App(){
       tab==="balances"  && React.createElement(BalancesView,{state:state,sm:sm,update:update,editable:sectionPerm("balances").can_edit}),
       tab==="timesheet" && React.createElement(TimesheetView,{state:state,sm:sm,update:update,editable:sectionPerm("timesheet").can_edit,viewerPid:viewerPid}),
       tab==="next8"     && React.createElement(Next8View,{state:state,sm:sm,viewerPid:viewerPid,editable:sectionPerm("next8").can_edit}),
-      tab==="setup"     && React.createElement(SetupView,{state:state,update:update,editable:sectionPerm("setup").can_edit,setState:setState})
+      tab==="setup"     && React.createElement(SetupView,{state:state,update:update,editable:sectionPerm("setup").can_edit,setState:setState}),
+      tab==="admin"     && React.createElement(AdminView,{state:state,effectiveRoleId:effectiveRoleId,userId:userId}),
+      tab==="dev"       && React.createElement(DevView,{onPermsChange:function(roleId,sectionId,payload){
+        setRolePerms(function(prev){
+          var next=Object.assign({},prev);
+          next[roleId]=Object.assign({},next[roleId]||{});
+          next[roleId][sectionId]={can_view:payload.can_view,can_edit:payload.can_edit};
+          return next;
+        });
+      }})
     ),
     React.createElement("footer",{style:{maxWidth:1200,margin:"0 auto",padding:"8px 24px 40px",color:C.faint,fontSize:12,display:"flex",alignItems:"center",flexWrap:"wrap",gap:"4px 10px"}},
       React.createElement("span",null,"Developed by Natan Magalhães"),
@@ -1507,6 +1516,243 @@ function Next8View(props){
 
 /* ================================================================== */
 const AV_OPTS=[["full","Full"],["am","AM"],["pm","PM"],["off","Off"]];
+function AdminView(props){
+  var state=props.state,effectiveRoleId=props.effectiveRoleId,userId=props.userId;
+  var profilesArr=useState(null); var profiles=profilesArr[0],setProfiles=profilesArr[1];
+  var loadErrArr=useState(null); var loadErr=loadErrArr[0],setLoadErr=loadErrArr[1];
+  var savingArr=useState({}); var saving=savingArr[0],setSaving=savingArr[1];
+
+  function reload(){
+    setLoadErr(null);
+    supabase.from("profiles").select("*").order("email").then(function(res){
+      if(res.error){console.warn("profiles load failed:",res.error);setLoadErr("Could not load profiles.");return;}
+      setProfiles(res.data||[]);
+    }).catch(function(e){console.warn("profiles load failed:",e);setLoadErr("Could not load profiles.");});
+  }
+  useEffect(function(){reload();},[]);
+
+  function saveRow(row,changes){
+    var uid=row.user_id;
+    setSaving(function(s){var n=Object.assign({},s);n[uid]="saving";return n;});
+    supabase.from("profiles").update(changes).eq("user_id",uid).select().single().then(function(res){
+      if(res.error){
+        console.warn("profile update failed:",res.error);
+        setSaving(function(s){var n=Object.assign({},s);n[uid]="error";return n;});
+        return;
+      }
+      setSaving(function(s){var n=Object.assign({},s);n[uid]="saved";return n;});
+      setProfiles(function(list){return list.map(function(p){return p.user_id===uid?res.data:p;});});
+    }).catch(function(e){
+      console.warn("profile update failed:",e);
+      setSaving(function(s){var n=Object.assign({},s);n[uid]="error";return n;});
+    });
+  }
+
+  function requestRoleChange(row,newRole){
+    var ok=window.confirm("Change "+row.email+"'s role to \""+newRole+"\"?");
+    if(!ok)return;
+    saveRow(row,{role_id:newRole});
+  }
+  function requestActiveChange(row,newActive){
+    if(newActive===false){
+      var ok=window.confirm("Deactivate "+row.email+"? They will lose access immediately.");
+      if(!ok)return;
+    }
+    saveRow(row,{active:newActive});
+  }
+
+  if(loadErr){
+    return React.createElement("div",{style:{color:C.gap}},loadErr,React.createElement("div",{style:{marginTop:8}},React.createElement("button",{onClick:reload,style:btnStyle},"Retry")));
+  }
+  if(!profiles){
+    return React.createElement("div",{style:{color:C.muted}},"Loading profiles...");
+  }
+
+  var roleOptions=effectiveRoleId==="dev"
+    ? [["dev","Dev"],["admin","Admin"],["dienstplan","Dienstplan"],["leitung","Leitung"],["ed_team","ED Team"],["team","Team"]]
+    : [["admin","Admin"],["dienstplan","Dienstplan"],["leitung","Leitung"],["ed_team","ED Team"],["team","Team"]];
+
+  return React.createElement("div",null,
+    React.createElement(Eyebrow,null,"Admin"),
+    React.createElement("h2",{style:{margin:"4px 0 8px",fontSize:19,fontWeight:700}},"User profiles"),
+    React.createElement("div",{style:{fontSize:12.5,color:C.muted,marginBottom:14,maxWidth:640}},
+      "New accounts are still created directly in Supabase Auth, with the profile row added manually by SQL. This screen manages role, linked team member, and active status for people already set up."
+    ),
+    React.createElement("div",{style:{overflowX:"auto"}},
+    React.createElement("table",{style:{width:"100%",borderCollapse:"collapse",minWidth:640}},
+      React.createElement("thead",null,React.createElement("tr",null,
+        React.createElement("th",{style:Object.assign({},th,{textAlign:"left"})},"Email"),
+        React.createElement("th",{style:th},"Role"),
+        React.createElement("th",{style:th},"Linked team member"),
+        React.createElement("th",{style:th},"Active"),
+        React.createElement("th",{style:th},"Status")
+      )),
+      React.createElement("tbody",null,
+        profiles.map(function(row){
+          var isSelf=row.user_id===userId;
+          var devLocked=row.role_id==="dev"&&effectiveRoleId!=="dev";
+          var roleLocked=devLocked||isSelf;
+          var activeLocked=devLocked||isSelf;
+          return React.createElement("tr",{key:row.user_id,style:{borderTop:"1px solid "+C.lineSoft}},
+            React.createElement("td",{style:Object.assign({},td,{textAlign:"left"})},row.email,isSelf&&React.createElement("span",{style:{color:C.faint,fontSize:11}}," (you)")),
+            React.createElement("td",{style:td},
+              devLocked
+                ? React.createElement("span",{style:{color:C.faint}},row.role_id)
+                : React.createElement("select",{value:row.role_id,disabled:roleLocked,onChange:function(e){requestRoleChange(row,e.target.value);},style:selStyle},
+                    roleOptions.map(function(o){return React.createElement("option",{key:o[0],value:o[0]},o[1]);})
+                  )
+            ),
+            React.createElement("td",{style:td},
+              React.createElement("select",{value:row.person_id||"",disabled:devLocked,onChange:function(e){saveRow(row,{person_id:e.target.value||null});},style:selStyle},
+                React.createElement("option",{value:""},"— not linked —"),
+                state.team.map(function(p){return React.createElement("option",{key:p.id,value:p.id},p.name);})
+              )
+            ),
+            React.createElement("td",{style:td},
+              React.createElement("input",{type:"checkbox",disabled:activeLocked,checked:!!row.active,onChange:function(e){requestActiveChange(row,e.target.checked);}})
+            ),
+            React.createElement("td",{style:Object.assign({},td,{color:saving[row.user_id]==="error"?C.gap:C.faint,fontSize:11.5})},
+              saving[row.user_id]==="saving"?"Saving...":saving[row.user_id]==="saved"?"Saved":saving[row.user_id]==="error"?"Error":(devLocked?"Dev — locked":isSelf?"Your own account":"")
+            )
+          );
+        })
+      )
+    )
+    )
+  );
+}
+
+function DevView(props){
+  var onPermsChange=props.onPermsChange;
+  var permsArr=useState(null); var perms=permsArr[0],setPerms=permsArr[1];
+  var loadErrArr=useState(null); var loadErr=loadErrArr[0],setLoadErr=loadErrArr[1];
+  var savingArr=useState({}); var saving=savingArr[0],setSaving=savingArr[1];
+
+  function reload(){
+    setLoadErr(null);
+    supabase.from("role_permissions").select("*").then(function(res){
+      if(res.error){console.warn("role_permissions load failed:",res.error);setLoadErr("Could not load permissions.");return;}
+      setPerms(res.data||[]);
+    }).catch(function(e){console.warn("role_permissions load failed:",e);setLoadErr("Could not load permissions.");});
+  }
+  useEffect(function(){reload();},[]);
+
+  function findPerm(list,roleId,sectionId){
+    return list.find(function(r){return r.role_id===roleId&&r.section_id===sectionId;});
+  }
+
+  // Dev and Admin sections are privileged: their access is fixed, not configurable.
+  function getCell(roleId,sectionId){
+    if(sectionId==="dev"){
+      if(roleId==="dev")return {canView:true,canEdit:true,locked:true};
+      return {canView:false,canEdit:false,locked:true};
+    }
+    if(sectionId==="admin"){
+      if(roleId==="dev"||roleId==="admin")return {canView:true,canEdit:true,locked:true};
+      return {canView:false,canEdit:false,locked:true};
+    }
+    var p=findPerm(perms,roleId,sectionId);
+    return {canView:p?p.can_view:false,canEdit:p?p.can_edit:false,locked:false};
+  }
+
+  function applyChange(roleId,sectionId,field,value){
+    var cell=getCell(roleId,sectionId);
+    if(cell.locked)return; // privileged sections never change through this screen
+    var canView=cell.canView,canEdit=cell.canEdit;
+    if(field==="can_view"){
+      canView=value;
+      if(!value)canEdit=false; // turning View off always turns Edit off too
+    } else {
+      canEdit=value;
+      if(value)canView=true; // turning Edit on always turns View on too
+      if(sectionId==="forecast")canEdit=false; // Coverage is never editable, no exceptions
+    }
+    var payload={role_id:roleId,section_id:sectionId,can_view:canView,can_edit:canEdit};
+    var key=roleId+"|"+sectionId;
+    setSaving(function(s){var n=Object.assign({},s);n[key]="saving";return n;});
+    supabase.from("role_permissions").upsert(payload,{onConflict:"role_id,section_id"}).select().then(function(res){
+      if(res.error){
+        console.warn("role_permissions save failed:",res.error);
+        setSaving(function(s){var n=Object.assign({},s);n[key]="error";return n;});
+        return;
+      }
+      setSaving(function(s){var n=Object.assign({},s);n[key]="saved";return n;});
+      setPerms(function(list){
+        var found=false;
+        var next=list.map(function(r){if(r.role_id===roleId&&r.section_id===sectionId){found=true;return payload;}return r;});
+        if(!found)next=next.concat([payload]);
+        return next;
+      });
+      if(onPermsChange)onPermsChange(roleId,sectionId,payload);
+    }).catch(function(e){
+      console.warn("role_permissions save failed:",e);
+      setSaving(function(s){var n=Object.assign({},s);n[key]="error";return n;});
+    });
+  }
+
+  if(loadErr){
+    return React.createElement("div",{style:{color:C.gap}},loadErr,React.createElement("div",{style:{marginTop:8}},React.createElement("button",{onClick:reload,style:btnStyle},"Retry")));
+  }
+  if(!perms){
+    return React.createElement("div",{style:{color:C.muted}},"Loading permissions...");
+  }
+
+  var roleIds=["dev","admin","dienstplan","leitung","ed_team","team"];
+
+  return React.createElement("div",null,
+    React.createElement(Eyebrow,null,"Dev"),
+    React.createElement("h2",{style:{margin:"4px 0 4px",fontSize:19,fontWeight:700}},"Role permissions"),
+    React.createElement("div",{style:{fontSize:12.5,color:C.muted,marginBottom:6,maxWidth:660}},
+      "Controls which sections each role can see and edit. Coverage is always view-only for every role. The Admin and Dev columns' Admin/Dev rows are fixed and cannot be changed here — Dev always has full access to both; Admin always has full access to Admin only; every other role has none."
+    ),
+    React.createElement("div",{style:{overflowX:"auto"}},
+    React.createElement("table",{style:{borderCollapse:"collapse",minWidth:780}},
+      React.createElement("thead",null,
+        React.createElement("tr",null,
+          React.createElement("th",{style:th},"Section"),
+          roleIds.map(function(r){return React.createElement("th",{key:r,style:th,colSpan:2},r);})
+        ),
+        React.createElement("tr",null,
+          React.createElement("th",{style:th},""),
+          roleIds.map(function(r){return [
+            React.createElement("th",{key:r+"-v",style:Object.assign({},th,{fontSize:10,fontWeight:500})},"View"),
+            React.createElement("th",{key:r+"-e",style:Object.assign({},th,{fontSize:10,fontWeight:500})},"Edit")
+          ];})
+        )
+      ),
+      React.createElement("tbody",null,
+        ALL_SECTIONS.map(function(sec){
+          var secId=sec[0],secLabel=sec[1];
+          var coverageLock=secId==="forecast";
+          return React.createElement("tr",{key:secId,style:{borderTop:"1px solid "+C.lineSoft}},
+            React.createElement("td",{style:Object.assign({},td,{fontWeight:600,textAlign:"left"})},secLabel),
+            roleIds.map(function(roleId){
+              var cell=getCell(roleId,secId);
+              var key=roleId+"|"+secId;
+              var status=saving[key];
+              var editDisabled=cell.locked||coverageLock||!cell.canView;
+              return [
+                React.createElement("td",{key:roleId+"-v",style:td},
+                  React.createElement("input",{type:"checkbox",checked:cell.canView,disabled:cell.locked,onChange:function(e){applyChange(roleId,secId,"can_view",e.target.checked);}})
+                ),
+                React.createElement("td",{key:roleId+"-e",style:td},
+                  React.createElement("input",{type:"checkbox",checked:cell.canEdit,disabled:editDisabled,onChange:function(e){applyChange(roleId,secId,"can_edit",e.target.checked);}}),
+                  status&&React.createElement("div",{style:{fontSize:9.5,color:status==="error"?C.gap:C.faint,marginTop:2}},status==="saving"?"Saving...":status==="saved"?"Saved":"Error")
+                )
+              ];
+            })
+          );
+        })
+      )
+    )
+    ),
+    React.createElement("h2",{style:{margin:"24px 0 8px",fontSize:19,fontWeight:700}},"App info"),
+    React.createElement("div",{style:{fontSize:13,color:C.muted}},
+      "Build: "+(APP_BUILD_TIME?formatBerlin(APP_BUILD_TIME):"unknown")
+    )
+  );
+}
+
 function SetupView(props){
   var state=props.state,update=props.update,editable=props.editable,setState=props.setState;
   var ioArr=useState(false); var importOpen=ioArr[0],setImportOpen=ioArr[1];
