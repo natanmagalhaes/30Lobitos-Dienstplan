@@ -352,16 +352,238 @@ function dayRequired(s,k,d){
 
 const hasStore=true;
 function loadState(){
-  return supabase.from("app_state").select("data,updated_at").eq("id","main").single().then(function(res){
+  return supabase.from("app_state").select("data,updated_at,version").eq("id","main").single().then(function(res){
     if(res.error)throw res.error;
-    return {data:res.data?res.data.data:null,updatedAt:res.data?res.data.updated_at:null};
+    return {data:res.data?res.data.data:null,updatedAt:res.data?res.data.updated_at:null,version:res.data?res.data.version:null};
   });
 }
-function saveState(s){
-  return supabase.from("app_state").update({data:s}).eq("id","main").select("updated_at").single().then(function(res){
-    if(res.error)throw res.error;
-    return res.data?res.data.updated_at:null;
+
+/* ---- Change diff engine: turns (previous state -> next state) into activity_log events ---- */
+function dayLabel(dc){var m={Mon:"Monday",Tue:"Tuesday",Wed:"Wednesday",Thu:"Thursday",Fri:"Friday"};return m[dc]||dc;}
+// Mirrors PostgreSQL jsonb equality more closely than raw JSON.stringify:
+// object-key order is ignored, while array order remains significant.
+function canonicalJsonValue(value){
+  if(Array.isArray(value))return value.map(canonicalJsonValue);
+  if(value&&typeof value==="object"){
+    var out={};
+    Object.keys(value).sort().forEach(function(key){
+      if(value[key]!==undefined)out[key]=canonicalJsonValue(value[key]);
+    });
+    return out;
+  }
+  return value;
+}
+function jsonEqual(a,b){return JSON.stringify(canonicalJsonValue(a))===JSON.stringify(canonicalJsonValue(b));}
+function buildChangeEvents(prev,next){
+  var events=[];
+  if(!prev)return events;
+
+  // ---- weeks (section: plan) ----
+  var wkKeys={}; Object.keys(prev.weeks||{}).forEach(function(k){wkKeys[k]=1;}); Object.keys(next.weeks||{}).forEach(function(k){wkKeys[k]=1;});
+  Object.keys(wkKeys).forEach(function(wk){
+    var pw=(prev.weeks||{})[wk]||{}, nw=(next.weeks||{})[wk]||{};
+    if(pw===nw)return;
+    var weekEventStart=events.length;
+    var teamById={}; (next.team||prev.team||[]).forEach(function(p){teamById[p.id]=p.name;});
+
+    // shift cell changes
+    var pAssign=pw.assign||{}, nAssign=nw.assign||{};
+    var pids={}; Object.keys(pAssign).forEach(function(k){pids[k]=1;}); Object.keys(nAssign).forEach(function(k){pids[k]=1;});
+    Object.keys(pids).forEach(function(pid){
+      var pd=pAssign[pid]||{}, nd=nAssign[pid]||{};
+      var days={}; Object.keys(pd).forEach(function(k){days[k]=1;}); Object.keys(nd).forEach(function(k){days[k]=1;});
+      Object.keys(days).forEach(function(d){
+        if((pd[d]||null)!==(nd[d]||null)){
+          events.push({section_id:"plan",action:"shift_changed",week_key:wk,person_id:pid,person_name:teamById[pid]||pid,day:d,before:pd[d]||null,after:nd[d]||null});
+        }
+      });
+    });
+
+    if(!jsonEqual(pw.customShifts||{},nw.customShifts||{})){
+      events.push({section_id:"plan",action:"custom_shift_changed",week_key:wk,changed_paths:["customShifts"]});
+    }
+    if(!jsonEqual(pw.backupByDay||{},nw.backupByDay||{})){
+      events.push({section_id:"plan",action:"backup_changed",week_key:wk,before:pw.backupByDay||{},after:nw.backupByDay||{}});
+    }
+    if(!jsonEqual(pw.notes||{},nw.notes||{})){
+      events.push({section_id:"plan",action:"note_updated",week_key:wk,changed_paths:["notes"]});
+    }
+    if(!jsonEqual(pw.adj||{},nw.adj||{})){
+      events.push({section_id:"plan",action:"adjustment_changed",week_key:wk,before:pw.adj||{},after:nw.adj||{}});
+    }
+    ["minOverride","u3Override","over3Override"].forEach(function(f){
+      if(!jsonEqual(pw[f]||{},nw[f]||{})){
+        events.push({section_id:"plan",action:f+"_changed",week_key:wk,before:pw[f]||{},after:nw[f]||{}});
+      }
+    });
+    if(!!pw.confirmed!==!!nw.confirmed){
+      events.push({section_id:"plan",action:nw.confirmed?"week_confirmed":"week_unconfirmed",week_key:wk});
+    }
+    if(!!pw.published!==!!nw.published){
+      events.push({section_id:"plan",action:nw.published?"week_published":"week_unpublished",week_key:wk});
+    }
+    // Generic safety net for any week field not covered above.
+    // This prevents a real change from being treated as already persisted.
+    if(!jsonEqual(pw,nw)&&events.length===weekEventStart){
+      events.push({section_id:"plan",action:"week_updated",week_key:wk,changed_paths:["weeks."+wk]});
+    }
   });
+
+  // ---- absences (section: absences) ----
+  var pAbs=prev.absences||[], nAbs=next.absences||[];
+  if(!jsonEqual(pAbs,nAbs)){
+    var pAbsById={}; pAbs.forEach(function(a){pAbsById[a.id]=a;});
+    var nAbsById={}; nAbs.forEach(function(a){nAbsById[a.id]=a;});
+    Object.keys(nAbsById).forEach(function(id){
+      if(!pAbsById[id])events.push({section_id:"absences",action:"absence_created",absence_id:id,after:nAbsById[id]});
+      else if(!jsonEqual(pAbsById[id],nAbsById[id]))events.push({section_id:"absences",action:"absence_edited",absence_id:id,before:pAbsById[id],after:nAbsById[id]});
+    });
+    Object.keys(pAbsById).forEach(function(id){
+      if(!nAbsById[id])events.push({section_id:"absences",action:"absence_removed",absence_id:id,before:pAbsById[id]});
+    });
+    if(events.every(function(e){return e.section_id!=="absences";})){
+      events.push({section_id:"absences",action:"absences_updated",changed_paths:["absences"]});
+    }
+  }
+
+  // ---- timesheetLog (section: timesheet) ----
+  var pTs=prev.timesheetLog||[], nTs=next.timesheetLog||[];
+  if(!jsonEqual(pTs,nTs)){
+    var pTsById={}; pTs.forEach(function(e){pTsById[e.id]=e;});
+    var nTsById={}; nTs.forEach(function(e){nTsById[e.id]=e;});
+    var tsEventAdded=false;
+    Object.keys(nTsById).forEach(function(id){
+      if(!pTsById[id]){events.push({section_id:"timesheet",action:"timesheet_added",entry_id:id,after:nTsById[id]});tsEventAdded=true;}
+    });
+    Object.keys(pTsById).forEach(function(id){
+      if(!nTsById[id]){events.push({section_id:"timesheet",action:"timesheet_removed",entry_id:id,before:pTsById[id]});tsEventAdded=true;}
+    });
+    if(!tsEventAdded)events.push({section_id:"timesheet",action:"timesheet_updated",changed_paths:["timesheetLog"]});
+  }
+
+  // ---- team (section: balances if only .note changed, in the same order; else setup) ----
+  var pTeam=prev.team||[], nTeam=next.team||[];
+  if(!jsonEqual(pTeam,nTeam)){
+    var sameOrderIds=pTeam.length===nTeam.length&&pTeam.every(function(p,i){return nTeam[i]&&nTeam[i].id===p.id;});
+    var onlyNotesDiffer=sameOrderIds&&pTeam.every(function(p,i){
+      var n=nTeam[i];
+      var pCopy=Object.assign({},p); delete pCopy.note;
+      var nCopy=Object.assign({},n); delete nCopy.note;
+      return jsonEqual(pCopy,nCopy);
+    });
+    if(onlyNotesDiffer){
+      pTeam.forEach(function(p,i){
+        if(p.note!==nTeam[i].note)events.push({section_id:"balances",action:"note_updated",person_id:p.id,person_name:p.name,before:p.note||"",after:nTeam[i].note||""});
+      });
+    } else {
+      events.push({section_id:"setup",action:"section_updated",changed_paths:["team"]});
+    }
+  }
+
+  // ---- shifts / settings (section: setup, generic) ----
+  if(!jsonEqual(prev.shifts||[],next.shifts||[])){
+    events.push({section_id:"setup",action:"section_updated",changed_paths:["shifts"]});
+  }
+  if(!jsonEqual(prev.settings||{},next.settings||{})){
+    events.push({section_id:"setup",action:"section_updated",changed_paths:["settings"]});
+  }
+
+  return events;
+}
+
+function saveAppStateRpc(newData,expectedVersion,events){
+  return supabase.rpc("save_app_state",{p_new_data:newData,p_expected_version:expectedVersion,p_events:events}).then(function(res){
+    if(res.error)throw res.error;
+    return res.data;
+  });
+}
+
+function buildBulkImportEvents(prev,next,sourceLabel){
+  var events=[];
+  if(!prev)return events;
+
+  // Keep bulk imports compact, but still provide one matching event for every
+  // section changed so the SQL permission checks remain valid.
+  var pWeeks=prev.weeks||{}, nWeeks=next.weeks||{};
+  var wkKeys={};
+  Object.keys(pWeeks).forEach(function(k){wkKeys[k]=1;});
+  Object.keys(nWeeks).forEach(function(k){wkKeys[k]=1;});
+  Object.keys(wkKeys).forEach(function(wk){
+    var pHas=Object.prototype.hasOwnProperty.call(pWeeks,wk);
+    var nHas=Object.prototype.hasOwnProperty.call(nWeeks,wk);
+    if(pHas!==nHas||!jsonEqual(pWeeks[wk]||{},nWeeks[wk]||{})){
+      events.push({section_id:"plan",action:"bulk_import",source:sourceLabel,week_key:wk});
+    }
+  });
+
+  if(!jsonEqual(prev.absences||[],next.absences||[])){
+    events.push({section_id:"absences",action:"bulk_import",source:sourceLabel});
+  }
+  if(!jsonEqual(prev.timesheetLog||[],next.timesheetLog||[])){
+    events.push({section_id:"timesheet",action:"bulk_import",source:sourceLabel});
+  }
+
+  var setupPaths=[];
+  var pTeam=prev.team||[], nTeam=next.team||[];
+  if(!jsonEqual(pTeam,nTeam)){
+    var sameOrderIds=pTeam.length===nTeam.length&&pTeam.every(function(p,i){return nTeam[i]&&nTeam[i].id===p.id;});
+    var onlyNotesDiffer=sameOrderIds&&pTeam.every(function(p,i){
+      var n=nTeam[i];
+      var pCopy=Object.assign({},p); delete pCopy.note;
+      var nCopy=Object.assign({},n); delete nCopy.note;
+      return jsonEqual(pCopy,nCopy);
+    });
+    if(onlyNotesDiffer){
+      events.push({section_id:"balances",action:"bulk_import",source:sourceLabel});
+    }else{
+      setupPaths.push("team");
+    }
+  }
+  if(!jsonEqual(prev.shifts||[],next.shifts||[]))setupPaths.push("shifts");
+  if(!jsonEqual(prev.settings||{},next.settings||{}))setupPaths.push("settings");
+  if(setupPaths.length){
+    events.push({section_id:"setup",action:"bulk_import",source:sourceLabel,changed_paths:setupPaths});
+  }
+
+  return events;
+}
+
+function bulkImportRpc(previousData,newData,expectedVersion,sourceLabel){
+  var events=buildBulkImportEvents(previousData,newData,sourceLabel);
+  return saveAppStateRpc(newData,expectedVersion,events);
+}
+
+function validateImportedStatePayload(value){
+  if(!value||typeof value!=="object"||Array.isArray(value)){
+    return "Imported data must be a JSON object.";
+  }
+  var required=["team","shifts","weeks","settings","absences","timesheetLog"];
+  var unknown=Object.keys(value).filter(function(key){return required.indexOf(key)<0;});
+  if(unknown.length){
+    return "Imported data contains unknown top-level keys: "+unknown.join(", ")+".";
+  }
+  var missing=required.filter(function(key){return !Object.prototype.hasOwnProperty.call(value,key);});
+  if(missing.length){
+    return "Imported data is missing required keys: "+missing.join(", ")+".";
+  }
+  if(!Array.isArray(value.team))return "Imported data.team must be an array.";
+  if(!Array.isArray(value.shifts))return "Imported data.shifts must be an array.";
+  if(!value.weeks||typeof value.weeks!=="object"||Array.isArray(value.weeks))return "Imported data.weeks must be an object.";
+  if(!value.settings||typeof value.settings!=="object"||Array.isArray(value.settings))return "Imported data.settings must be an object.";
+  if(!Array.isArray(value.absences))return "Imported data.absences must be an array.";
+  if(!Array.isArray(value.timesheetLog))return "Imported data.timesheetLog must be an array.";
+  return null;
+}
+
+function normalizeImportedStatePayload(value){
+  return {
+    team:value.team,
+    shifts:value.shifts,
+    weeks:value.weeks,
+    settings:Object.assign({},DEFAULT_SETTINGS,value.settings),
+    absences:value.absences,
+    timesheetLog:value.timesheetLog
+  };
 }
 
 /* ---- UI primitives ---- */
@@ -376,7 +598,8 @@ function SyncBadge(props){
     connected:{color:C.ok,label:"Connected"},
     saving:{color:C.tight,label:"Saving..."},
     saved:{color:C.ok,label:"Saved"},
-    error:{color:C.gap,label:"Connection error"}
+    error:{color:C.gap,label:"Connection error"},
+    conflict:{color:C.gap,label:"Conflict — reload needed"}
   };
   var m=map[status]||map.connecting;
   return React.createElement("span",{style:{display:"inline-flex",alignItems:"center",gap:6,marginLeft:10}},
@@ -566,6 +789,56 @@ export default function App(){
     }).catch(function(e){console.warn("role_permissions fetch failed:",e);setRolePerms(null);});
   },[userId]);
 
+  var stateRef=useRef(state); stateRef.current=state;
+  var lastPersistedRef=useRef(null);
+  var expectedVersionRef=useRef(null);
+  var savingInFlightRef=useRef(false);
+  var pendingRef=useRef(false);
+  var nextSaveIsBulkRef=useRef(null);
+  function markNextSaveBulk(sourceLabel){nextSaveIsBulkRef.current=sourceLabel;}
+
+  function runSaveCycle(){
+    if(savingInFlightRef.current)return;
+    var snapshot=stateRef.current;
+    if(snapshot===lastPersistedRef.current)return;
+    var bulkSource=nextSaveIsBulkRef.current;
+    var events=null;
+    if(!bulkSource){
+      events=buildChangeEvents(lastPersistedRef.current,snapshot);
+    }
+    nextSaveIsBulkRef.current=null;
+    savingInFlightRef.current=true;
+    setSyncStatus("saving");
+    var call=bulkSource
+      ? bulkImportRpc(lastPersistedRef.current,snapshot,expectedVersionRef.current,bulkSource)
+      : saveAppStateRpc(snapshot,expectedVersionRef.current,events);
+    call.then(function(res){
+      savingInFlightRef.current=false;
+      lastPersistedRef.current=snapshot;
+      expectedVersionRef.current=res.version;
+      if(res.updated_at)setLastDataUpdate(res.updated_at);
+      setSyncStatus("saved");
+      if(pendingRef.current){
+        pendingRef.current=false;
+        runSaveCycle();
+      }
+    }).catch(function(e){
+      savingInFlightRef.current=false;
+      console.warn("save_app_state failed:",e);
+      var msg=(e&&e.message)||"";
+      if(msg.indexOf("version_conflict")>=0){
+        setSyncStatus("conflict");
+      } else {
+        setSyncStatus("error");
+      }
+      // Preserve a failed bulk import marker so a later retry does not expand
+      // the same import into hundreds of granular events.
+      if(bulkSource&&!nextSaveIsBulkRef.current)nextSaveIsBulkRef.current=bulkSource;
+      // Deliberately NOT updating lastPersistedRef/expectedVersionRef on failure,
+      // and NOT retrying automatically — no silent fallback, ever.
+    });
+  }
+
   useEffect(function(){
     if(!userId||!profileCanAccessApp)return;
     setSyncStatus("connecting");
@@ -575,7 +848,13 @@ export default function App(){
         throw new Error("Invalid or empty app_state data");
       }
       skipNextSaveRef.current=true;
-      setState(function(p){return Object.assign({},p,s,{settings:Object.assign({},DEFAULT_SETTINGS,s.settings||{}),absences:s.absences||[],timesheetLog:s.timesheetLog||[]});});
+      var merged=null;
+      setState(function(p){
+        merged=Object.assign({},p,s,{settings:Object.assign({},DEFAULT_SETTINGS,s.settings||{}),absences:s.absences||[],timesheetLog:s.timesheetLog||[]});
+        return merged;
+      });
+      lastPersistedRef.current=merged;
+      expectedVersionRef.current=res.version;
       if(res.updatedAt)setLastDataUpdate(res.updatedAt);
       setRemoteLoadedSuccessfully(true);
       setLoaded(true);
@@ -593,14 +872,11 @@ export default function App(){
       skipNextSaveRef.current=false;
       return;
     }
-    setSyncStatus("saving");
-    saveState(state).then(function(updatedAt){
-      setSyncStatus("saved");
-      if(updatedAt)setLastDataUpdate(updatedAt);
-    }).catch(function(e){
-      console.warn("saveState failed:",e);
-      setSyncStatus("error");
-    });
+    if(savingInFlightRef.current){
+      pendingRef.current=true;
+      return;
+    }
+    runSaveCycle();
   },[state,userId,profileCanAccessApp,remoteLoadedSuccessfully]);
   useEffect(function(){if(!viewerPid&&state.team.length){var p=state.team.find(function(x){return x.active;});if(p)setViewerPid(p.id);}},[state.team]);
 
@@ -807,7 +1083,15 @@ export default function App(){
           tabs.map(function(kl){return React.createElement("button",{key:kl[0],onClick:function(){setTab(kl[0]);},style:{border:"none",cursor:"pointer",borderRadius:7,padding:"8px 14px",fontSize:13.5,fontWeight:600,fontFamily:FONT,background:tab===kl[0]?C.surface:"transparent",color:tab===kl[0]?C.primaryDark:C.muted,boxShadow:tab===kl[0]?"0 1px 2px rgba(0,0,0,.08)":"none"}},kl[1]);})
         )
       ),
-      isDevUser&&previewRole!=="dev"&&React.createElement("div",{style:{background:C.tightBg,color:C.tight,fontSize:12.5,fontWeight:700,textAlign:"center",padding:"6px 12px"}},"Preview mode: "+previewRole)
+      isDevUser&&previewRole!=="dev"&&React.createElement("div",{style:{background:C.tightBg,color:C.tight,fontSize:12.5,fontWeight:700,textAlign:"center",padding:"6px 12px"}},"Preview mode: "+previewRole),
+      syncStatus==="conflict"&&React.createElement("div",{style:{background:C.gapBg,color:C.gap,fontSize:12.5,fontWeight:700,textAlign:"center",padding:"8px 12px",display:"flex",alignItems:"center",justifyContent:"center",gap:10}},
+        React.createElement("span",null,"Someone else saved changes since you loaded this page. Reload before continuing, to avoid overwriting their work."),
+        React.createElement("button",{onClick:function(){window.location.reload();},style:Object.assign({},btnStyle,{padding:"4px 10px",fontSize:12})},"Reload")
+      ),
+      syncStatus==="error"&&remoteLoadedSuccessfully&&React.createElement("div",{style:{background:C.tightBg,color:C.tight,fontSize:12.5,fontWeight:700,textAlign:"center",padding:"8px 12px",display:"flex",alignItems:"center",justifyContent:"center",gap:10}},
+        React.createElement("span",null,"The last save failed. Your changes are still open in this tab and have not been marked as saved."),
+        React.createElement("button",{onClick:runSaveCycle,style:Object.assign({},btnStyle,{padding:"4px 10px",fontSize:12})},"Retry save")
+      )
     ),
     React.createElement("main",{style:{maxWidth:1200,margin:"0 auto",padding:"22px 24px"}},
       tab==="plan"      && React.createElement(PlanView,{state:state,sm:sm,week:week,setWeek:setWeek,wkIdx:wkIdx,prevWeek:prevWeek,nextWeek:nextWeek,editable:sectionPerm("plan").can_edit,setCell:setCell,setNote:setNote,setAdj:setAdj,setMinOverride:setMinOverride,setU3Ov:setU3Ov,setOver3Ov:setOver3Ov,setBackupWeek:setBackupWeek,setCustomShift:setCustomShift,toggleWeek:toggleWeek,planUndo:planUndo,planRedo:planRedo,undoStack:undoStack,redoStack:redoStack}),
@@ -816,7 +1100,7 @@ export default function App(){
       tab==="balances"  && React.createElement(BalancesView,{state:state,sm:sm,update:update,editable:sectionPerm("balances").can_edit}),
       tab==="timesheet" && React.createElement(TimesheetView,{state:state,sm:sm,update:update,editable:sectionPerm("timesheet").can_edit,viewerPid:viewerPid}),
       tab==="next8"     && React.createElement(Next8View,{state:state,sm:sm,viewerPid:viewerPid,editable:sectionPerm("next8").can_edit}),
-      tab==="setup"     && React.createElement(SetupView,{state:state,update:update,editable:sectionPerm("setup").can_edit,setState:setState}),
+      tab==="setup"     && React.createElement(SetupView,{state:state,update:update,editable:sectionPerm("setup").can_edit,setState:setState,markNextSaveBulk:markNextSaveBulk,effectiveRoleId:effectiveRoleId}),
       tab==="admin"     && React.createElement(AdminView,{state:state,effectiveRoleId:effectiveRoleId,userId:userId}),
       tab==="dev"       && React.createElement(DevView,{onPermsChange:function(roleId,sectionId,payload){
         setRolePerms(function(prev){
@@ -878,6 +1162,65 @@ function HourlyCoverageBar(props){
 }
 
 /* ================================================================== */
+function HistoryPanel(props){
+  var weekKey=props.weekKey;
+  var itemsArr=useState(null); var items=itemsArr[0],setItems=itemsArr[1];
+  var errArr=useState(null); var err=errArr[0],setErr=errArr[1];
+  var limitArr=useState(50); var limit=limitArr[0],setLimit=limitArr[1];
+
+  function reload(lim){
+    setErr(null);
+    supabase.from("activity_log").select("*").eq("section_id","plan").eq("details->>week_key",weekKey)
+      .order("created_at",{ascending:false}).order("id",{ascending:false}).limit(lim||limit)
+      .then(function(res){
+        if(res.error){console.warn("activity_log load failed:",res.error);setErr("Could not load history.");return;}
+        setItems(res.data||[]);
+      }).catch(function(e){console.warn("activity_log load failed:",e);setErr("Could not load history.");});
+  }
+  useEffect(function(){reload(limit);},[weekKey,limit]);
+
+  function describe(row){
+    var d=row.details||{};
+    var action=d.action||row.action;
+    var map={
+      shift_changed:(d.person_name||d.person_id)+", "+dayLabel(d.day)+": "+(d.before||"—")+" → "+(d.after||"—"),
+      week_confirmed:"Week confirmed",
+      week_unconfirmed:"Week confirmation removed",
+      week_published:"Week published to team",
+      week_unpublished:"Week unpublished",
+      custom_shift_changed:"Custom shift changed",
+      backup_changed:"Backup assignment changed",
+      note_updated:"Note updated",
+      adjustment_changed:"Hour adjustment changed",
+      minOverride_changed:"Minimum staff override changed",
+      u3Override_changed:"U3 override changed",
+      over3Override_changed:"3+ override changed",
+      week_updated:"Week settings updated",
+      bulk_import:"Bulk import ("+(d.source||"unknown source")+")"
+    };
+    return map[action]||action||"Change";
+  }
+
+  if(err){return React.createElement("div",{style:{color:C.gap,margin:"8px 0"}},err);}
+  if(!items){return React.createElement("div",{style:{color:C.muted,margin:"8px 0"}},"Loading history...");}
+
+  return React.createElement("div",{style:{background:C.surface,border:"1px solid "+C.line,borderRadius:10,padding:"12px 14px",marginBottom:12}},
+    React.createElement("div",{style:{fontWeight:700,fontSize:14,marginBottom:8}},"History — this week"),
+    items.length===0
+      ? React.createElement("div",{style:{color:C.muted,fontSize:13}},"No recorded changes for this week yet.")
+      : React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:10}},
+          items.map(function(row){
+            return React.createElement("div",{key:row.id,style:{borderBottom:"1px solid "+C.lineSoft,paddingBottom:8}},
+              React.createElement("div",{style:{fontSize:12.5,fontWeight:700,color:C.primaryDark}},formatBerlin(row.created_at)),
+              React.createElement("div",{style:{fontSize:13,margin:"2px 0"}},describe(row)),
+              React.createElement("div",{style:{fontSize:11.5,color:C.faint}},(row.user_email||"—")+" · "+(row.role_id||"—"))
+            );
+          })
+        ),
+    items.length>=limit&&React.createElement("button",{onClick:function(){setLimit(function(l){return l+50;});},style:Object.assign({},btnStyle,{marginTop:10,padding:"5px 12px",fontSize:12.5})},"Load more")
+  );
+}
+
 function PlanView(props){
   var state=props.state,sm=props.sm,week=props.week,setWeek=props.setWeek,editable=props.editable;
   var setCell=props.setCell,setNote=props.setNote,setAdj=props.setAdj,setMinOverride=props.setMinOverride,toggleWeek=props.toggleWeek;
@@ -900,6 +1243,7 @@ function PlanView(props){
     var dd=new Date(wkMo);dd.setDate(wkMo.getDate()+i);dd.setHours(0,0,0,0);
     return dd<todayCut;
   });
+  var historyOpenArr=useState(false); var historyOpen=historyOpenArr[0],setHistoryOpen=historyOpenArr[1];
 
   return React.createElement("section",null,
     /* top bar */
@@ -911,7 +1255,8 @@ function PlanView(props){
           WEEKS.map(function(x){return React.createElement("option",{key:x.key,value:x.key},x.kw+" · "+x.range);})
         ),
         React.createElement("button",{onClick:nextWeek,disabled:wkIdx===WEEKS.length-1,style:Object.assign({},btnStyle,{padding:"5px 10px",fontSize:14,opacity:wkIdx===WEEKS.length-1?0.3:1})},"→"),
-        w.published?React.createElement(Pill,{tone:"ok"},"Published"):React.createElement(Pill,{tone:"neutral"},"Draft")
+        w.published?React.createElement(Pill,{tone:"ok"},"Published"):React.createElement(Pill,{tone:"neutral"},"Draft"),
+        React.createElement("button",{onClick:function(){setHistoryOpen(function(o){return !o;});},style:Object.assign({},btnStyle,{padding:"5px 12px",fontSize:12.5})},historyOpen?"Hide history":"History")
       ),
       editable && React.createElement("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}},
         React.createElement("button",{onClick:planUndo,disabled:!undoStack.length,title:"Undo last change in this week",style:Object.assign({},btnStyle,{padding:"8px 12px",opacity:undoStack.length?1:0.4})},"↩ Undo"),
@@ -920,6 +1265,7 @@ function PlanView(props){
         React.createElement("button",{onClick:function(){toggleWeek("published");},style:Object.assign({},btnStyle,{background:w.published?C.primary:C.surface,color:w.published?"#fff":C.primaryDark,borderColor:w.published?C.primary:C.line})},w.published?"Unpublish":"Publish to team")
       )
     ),
+    historyOpen&&React.createElement(HistoryPanel,{weekKey:week}),
     /* U3 / U3+ panel + backup */
     React.createElement("div",{style:{background:C.surface,border:"1px solid "+C.line,borderRadius:10,padding:"10px 14px",marginBottom:12,overflowX:"auto"}},
       React.createElement("div",{style:{display:"grid",gridTemplateColumns:"120px repeat(5,1fr)",gap:6,fontSize:12,minWidth:560}},
@@ -1755,6 +2101,8 @@ function DevView(props){
 
 function SetupView(props){
   var state=props.state,update=props.update,editable=props.editable,setState=props.setState;
+  var markNextSaveBulk=props.markNextSaveBulk,effectiveRoleId=props.effectiveRoleId;
+  var isDevOrAdmin=effectiveRoleId==="dev"||effectiveRoleId==="admin";
   var ioArr=useState(false); var importOpen=ioArr[0],setImportOpen=ioArr[1];
   var snapArr=useState(null); var snapResult=snapArr[0],setSnapResult=snapArr[1];
   var snapConfArr=useState(false); var snapConfirm=snapConfArr[0],setSnapConfirm=snapConfArr[1];
@@ -1778,10 +2126,36 @@ function SetupView(props){
     update(function(s){lines.forEach(function(l){var parts=l.split(/[;,\t]/).map(function(x){return x&&x.trim();});var name=parts[0],h=parts[1],d=parts[2];if(name){var np=mkPerson(name,Number(h)||0,Number(d)||0);np.id="p-"+Date.now()+"-"+Math.random().toString(36).slice(2,6);s.team.push(np);}});return s;});
     setImportText("");setImportOpen(false);
   }
+  function createLocalStateBackup(label){
+    var backupKey="kita30-"+label+"-backup-"+Date.now();
+    var backupData={
+      team:state.team,
+      shifts:state.shifts,
+      weeks:state.weeks,
+      settings:state.settings,
+      absences:state.absences||[],
+      timesheetLog:state.timesheetLog||[]
+    };
+    try{
+      window.localStorage.setItem(backupKey,JSON.stringify(backupData));
+      return backupKey;
+    }catch(e){
+      console.warn("local backup failed:",e);
+      return null;
+    }
+  }
   function loadSnapshot(){
+    if(!isDevOrAdmin){setMsg("Only Dev/Admin can load the snapshot.");return;}
+    var backupKey=createLocalStateBackup("snapshot");
+    if(!backupKey){
+      setMsg("Snapshot cancelled because the local backup could not be created.");
+      setSnapResult(null);
+      return;
+    }
+    if(markNextSaveBulk)markNextSaveBulk("load_snapshot");
     // Build week data from snapshot rows
     var DAYS_ORDER=["Mon","Tue","Wed","Thu","Fri"];
-    var report={weeksImported:0,shiftsAdded:[],absencesAdded:0,normalShifts:0,skipped:0,warnings:[]};
+    var report={weeksImported:0,shiftsAdded:[],absencesAdded:0,normalShifts:0,skipped:0,warnings:[],backupKey:backupKey};
     // Ensure missing shifts exist
     var shiftsToAdd=["Limpieza","Cocina","FFU"];
     shiftsToAdd.forEach(function(code){
@@ -1792,7 +2166,6 @@ function SetupView(props){
     setState(function(prev){
       var next=JSON.parse(JSON.stringify(prev));
       // Add missing shifts
-      var shiftCodes=["Limpieza","Cocina","FFU"];
       var shiftDefs=[
         {code:"Limpieza",label:"Limpieza (cleaning)",time:"xx:xx-xx:xx",start:null,end:null,hours:4,work:true},
         {code:"Cocina",  label:"Cocina (kitchen)",   time:"xx:xx-xx:xx",start:null,end:null,hours:3,work:true},
@@ -1803,13 +2176,11 @@ function SetupView(props){
           next.shifts.push(def);
         }
       });
-      // Backup current KW25-27 to a separate storage key before overwriting
-      var backupKey="kita30-snapshot-backup-"+Date.now();
-      var backupData={};
-      ["2026-KW25","2026-KW26","2026-KW27"].forEach(function(k){
-        if(next.weeks[k]) backupData[k]=JSON.parse(JSON.stringify(next.weeks[k]));
+      // Remove previous snapshot-generated absences for these three weeks once.
+      var snapshotWeekKeys={"2026-KW25":true,"2026-KW26":true,"2026-KW27":true};
+      next.absences=(next.absences||[]).filter(function(a){
+        return !(a&&a.source==="snapshot_sheets"&&snapshotWeekKeys[isoWeekKey(a.date)]);
       });
-      if(window.storage) window.storage.set(backupKey,JSON.stringify(backupData));
       // Build person lookup by name (trimmed)
       var personByName={};
       next.team.forEach(function(p){personByName[p.name.trim()]=p;});
@@ -1879,11 +2250,7 @@ function SetupView(props){
           });
         }
         next.weeks[weekKey]=newWeek;
-        // Add absences (remove old snapshot absences for these weeks first)
-        next.absences=(next.absences||[]).filter(function(a){
-          var wk=a.date&&a.date.startsWith("2026-06")||a.date&&a.date.startsWith("2026-07");
-          return !(a.source==="snapshot_sheets"&&(weekKey==="2026-KW25"||weekKey==="2026-KW26"||weekKey==="2026-KW27"));
-        });
+        // Add the snapshot absences for this week.
         next.absences=next.absences.concat(absToAdd);
         report.weeksImported++;
       });
@@ -1895,8 +2262,30 @@ function SetupView(props){
   var exportJSON=JSON.stringify({team:state.team,shifts:state.shifts,weeks:state.weeks,settings:state.settings,absences:state.absences||[],timesheetLog:state.timesheetLog||[]},null,2);
   function download(){try{var blob=new Blob([exportJSON],{type:"application/json"});var url=URL.createObjectURL(blob);var a=document.createElement("a");a.href=url;a.download="kita-dienstplan-data.json";document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);}catch(e){setMsg("Download blocked — copy instead.");}}
   function copy(){try{navigator.clipboard.writeText(exportJSON);setMsg("Copied.");}catch(e){setMsg("Copy blocked — select manually.");}}
-  function applyImport(text){try{var o=JSON.parse(text);setState(function(s){return Object.assign({},s,{team:o.team||s.team,shifts:o.shifts||s.shifts,weeks:o.weeks||s.weeks,settings:Object.assign({},DEFAULT_SETTINGS,o.settings||{}),absences:o.absences||[],timesheetLog:o.timesheetLog||[]});});setMsg("Data loaded.");setPasteData("");}catch(e){setMsg("Could not parse JSON.");}}
-  function onFile(e){var f=e.target.files&&e.target.files[0];if(!f)return;f.text().then(applyImport);}
+  function applyImport(text){
+    if(!isDevOrAdmin){setMsg("Only Dev/Admin can import data.");return;}
+    var o=null;
+    try{
+      o=JSON.parse(text);
+    }catch(e){
+      setMsg("Could not parse JSON.");
+      return;
+    }
+    var validationError=validateImportedStatePayload(o);
+    if(validationError){setMsg(validationError);return;}
+    var ok=window.confirm("This will replace the current team, shifts, weeks, absences and timesheet data with the imported file. Continue?");
+    if(!ok)return;
+    var backupKey=createLocalStateBackup("json-import");
+    if(!backupKey){
+      setMsg("Import cancelled because the local backup could not be created.");
+      return;
+    }
+    if(markNextSaveBulk)markNextSaveBulk("json_import");
+    setState(normalizeImportedStatePayload(o));
+    setMsg("Data loaded. Local backup: "+backupKey);
+    setPasteData("");
+  }
+  function onFile(e){var f=e.target.files&&e.target.files[0];if(!f)return;f.text().then(applyImport).catch(function(){setMsg("Could not read the selected file.");});}
 
   return React.createElement("section",{style:{display:"grid",gap:22}},
     React.createElement("div",null,
@@ -2028,7 +2417,7 @@ function SetupView(props){
     editable&&React.createElement("div",null,
       React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between"}},
         React.createElement(Eyebrow,null,"Backup & transfer"),
-        editable&&React.createElement("div",{style:{marginBottom:12,background:C.primarySoft,border:"1px solid "+C.primary+"33",borderRadius:10,padding:"12px 14px"}},
+        editable&&isDevOrAdmin&&React.createElement("div",{style:{marginBottom:12,background:C.primarySoft,border:"1px solid "+C.primary+"33",borderRadius:10,padding:"12px 14px"}},
           React.createElement("div",{style:{fontWeight:700,fontSize:14,marginBottom:4,color:C.primaryDark}},"Load Kita Snapshot (KW25–KW27)"),
           React.createElement("p",{style:{fontSize:12.5,color:C.muted,margin:"0 0 10px"}},"Loads real schedule data for KW25 (16.06), KW26 (22.06) and KW27 (29.06) from the Dienstplan 2026 Google Sheets snapshot. Current data for these weeks will be replaced. A local backup will be saved before loading."),
           !snapConfirm&&React.createElement("button",{onClick:function(){setSnapConfirm(true);setSnapResult(null);},style:Object.assign({},btnStyle,{background:C.primary,color:"#fff",borderColor:C.primary})},"Load snapshot…"),
@@ -2044,6 +2433,7 @@ function SetupView(props){
             React.createElement("div",null,"✓ Weeks imported: ",React.createElement("b",null,snapResult.weeksImported)),
             React.createElement("div",null,"✓ Normal shifts: ",React.createElement("b",null,snapResult.normalShifts)),
             React.createElement("div",null,"✓ Absences added: ",React.createElement("b",null,snapResult.absencesAdded)),
+            React.createElement("div",null,"✓ Local backup: ",React.createElement("code",null,snapResult.backupKey)),
             snapResult.shiftsAdded.length>0&&React.createElement("div",null,"✓ Shift types added: ",React.createElement("b",null,snapResult.shiftsAdded.join(", "))),
             snapResult.skipped>0&&React.createElement("div",{style:{color:C.tight}},"⚠ Skipped (unknown codes): ",React.createElement("b",null,snapResult.skipped)),
             snapResult.warnings.length>0&&React.createElement("div",{style:{marginTop:6}},
@@ -2064,7 +2454,7 @@ function SetupView(props){
           ),
           React.createElement("textarea",{readOnly:true,value:exportJSON,rows:5,onFocus:function(e){e.target.select();},style:{width:"100%",fontFamily:"monospace",fontSize:11.5,padding:10,borderRadius:8,border:"1px solid "+C.line,boxSizing:"border-box",color:C.muted}})
         ),
-        React.createElement("div",null,
+        isDevOrAdmin&&React.createElement("div",null,
           React.createElement("div",{style:{fontWeight:700,fontSize:14,marginBottom:6}},"Import"),
           React.createElement("input",{type:"file",accept:"application/json",onChange:onFile,style:{fontSize:13,marginBottom:8}}),
           React.createElement("textarea",{value:pasteData,onChange:function(e){setPasteData(e.target.value);},rows:4,placeholder:"…or paste JSON here",style:{width:"100%",fontFamily:"monospace",fontSize:11.5,padding:10,borderRadius:8,border:"1px solid "+C.line,boxSizing:"border-box"}}),
