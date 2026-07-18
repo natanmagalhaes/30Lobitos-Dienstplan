@@ -360,6 +360,13 @@ function loadState(){
 
 /* ---- Change diff engine: turns (previous state -> next state) into activity_log events ---- */
 function dayLabel(dc){var m={Mon:"Monday",Tue:"Tuesday",Wed:"Wednesday",Thu:"Thursday",Fri:"Friday"};return m[dc]||dc;}
+function planDayDate(weekKey,dayCode){
+  var weekInfo=WEEKS.find(function(w){return w.key===weekKey;});
+  var dayIndex=DAYS.indexOf(dayCode);
+  if(!weekInfo||dayIndex<0)return dayLabel(dayCode);
+  var date=new Date(weekInfo.mo);date.setDate(weekInfo.mo.getDate()+dayIndex);
+  return String(date.getDate()).padStart(2,"0")+"."+String(date.getMonth()+1).padStart(2,"0")+"."+date.getFullYear();
+}
 // Mirrors PostgreSQL jsonb equality more closely than raw JSON.stringify:
 // object-key order is ignored, while array order remains significant.
 function canonicalJsonValue(value){
@@ -412,9 +419,17 @@ function buildChangeEvents(prev,next){
       events.push({section_id:"plan",action:"adjustment_changed",week_key:wk,before:pw.adj||{},after:nw.adj||{}});
     }
     ["minOverride","u3Override","over3Override"].forEach(function(f){
-      if(!jsonEqual(pw[f]||{},nw[f]||{})){
-        events.push({section_id:"plan",action:f+"_changed",week_key:wk,before:pw[f]||{},after:nw[f]||{}});
-      }
+      var pOverrides=pw[f]||{},nOverrides=nw[f]||{};
+      var overrideDays={};
+      Object.keys(pOverrides).forEach(function(d){overrideDays[d]=1;});
+      Object.keys(nOverrides).forEach(function(d){overrideDays[d]=1;});
+      Object.keys(overrideDays).forEach(function(d){
+        var before=Object.prototype.hasOwnProperty.call(pOverrides,d)?pOverrides[d]:null;
+        var after=Object.prototype.hasOwnProperty.call(nOverrides,d)?nOverrides[d]:null;
+        if(!jsonEqual(before,after)){
+          events.push({section_id:"plan",action:f+"_changed",week_key:wk,day:d,before:before,after:after});
+        }
+      });
     });
     if(!!pw.confirmed!==!!nw.confirmed){
       events.push({section_id:"plan",action:nw.confirmed?"week_confirmed":"week_unconfirmed",week_key:wk});
@@ -1179,11 +1194,27 @@ function HistoryPanel(props){
   }
   useEffect(function(){reload(limit);},[weekKey,limit]);
 
+  function affectedDate(d){
+    if(d.day)return planDayDate(d.week_key,d.day);
+
+    // Older Phase 3D1 preview events stored the whole override object.
+    // Derive the affected day(s) so those rows also become understandable.
+    var before=d.before,after=d.after;
+    if(!before||typeof before!=="object"||Array.isArray(before)||!after||typeof after!=="object"||Array.isArray(after))return "";
+    var keys={};
+    Object.keys(before).forEach(function(k){keys[k]=1;});
+    Object.keys(after).forEach(function(k){keys[k]=1;});
+    return DAYS.filter(function(day){return keys[day]&&!jsonEqual(before[day],after[day]);})
+      .map(function(day){return planDayDate(d.week_key,day);}).join(", ");
+  }
+
   function describe(row){
     var d=row.details||{};
     var action=d.action||row.action;
+    var date=affectedDate(d);
+    var dateSuffix=date?" from "+date:"";
     var map={
-      shift_changed:(d.person_name||d.person_id)+", "+dayLabel(d.day)+": "+(d.before||"—")+" → "+(d.after||"—"),
+      shift_changed:(d.person_name||d.person_id)+" shift"+dateSuffix+": "+(d.before||"—")+" → "+(d.after||"—"),
       week_confirmed:"Week confirmed",
       week_unconfirmed:"Week confirmation removed",
       week_published:"Week published to team",
@@ -1192,13 +1223,24 @@ function HistoryPanel(props){
       backup_changed:"Backup assignment changed",
       note_updated:"Note updated",
       adjustment_changed:"Hour adjustment changed",
-      minOverride_changed:"Minimum staff override changed",
-      u3Override_changed:"U3 override changed",
-      over3Override_changed:"3+ override changed",
+      minOverride_changed:"Minimum staff override"+dateSuffix+" changed",
+      u3Override_changed:"U3 override"+dateSuffix+" changed",
+      over3Override_changed:"3+ override"+dateSuffix+" changed",
       week_updated:"Week settings updated",
       bulk_import:"Bulk import ("+(d.source||"unknown source")+")"
     };
     return map[action]||action||"Change";
+  }
+
+  function historyLine(row){
+    var when=(formatBerlin(row.created_at)||"").replace(", "," ");
+    var role=row.role_id||"unknown role";
+    var email=row.user_email?" · "+row.user_email:"";
+    return React.createElement(React.Fragment,null,
+      React.createElement("span",{style:{fontWeight:700,color:C.primaryDark}},when),
+      React.createElement("span",null," - "+describe(row)),
+      React.createElement("span",{style:{fontSize:11.5,color:C.faint}}," by "+role+email)
+    );
   }
 
   if(err){return React.createElement("div",{style:{color:C.gap,margin:"8px 0"}},err);}
@@ -1211,9 +1253,7 @@ function HistoryPanel(props){
       : React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:10}},
           items.map(function(row){
             return React.createElement("div",{key:row.id,style:{borderBottom:"1px solid "+C.lineSoft,paddingBottom:8}},
-              React.createElement("div",{style:{fontSize:12.5,fontWeight:700,color:C.primaryDark}},formatBerlin(row.created_at)),
-              React.createElement("div",{style:{fontSize:13,margin:"2px 0"}},describe(row)),
-              React.createElement("div",{style:{fontSize:11.5,color:C.faint}},(row.user_email||"—")+" · "+(row.role_id||"—"))
+              React.createElement("div",{style:{fontSize:12.5,color:C.ink}},historyLine(row))
             );
           })
         ),
