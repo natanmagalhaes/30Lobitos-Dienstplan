@@ -3,7 +3,7 @@ const { useState, useEffect, useMemo, useCallback, useRef } = React;
 import { supabase } from "./supabaseClient.js";
 
 /* ================================================================== *
- * Kita 30 Lobitos — Shift Plan v5
+ * Kita 30 Lobitos — Dienstplan v7
  * ================================================================== */
 
 const STORAGE_KEY = "kita30-dienstplan-v8";
@@ -85,6 +85,7 @@ const DEFAULT_TEAM = [
   mkPerson("Jimena",12,3,{ts:0,coverage:false,cleaning:true,vac:20,qual:["Cleaning"]}),
 ];
 const DEFAULT_SETTINGS = {defaultMin:5, u3Default:10, over3Default:20, u3Ratio:4, over3Ratio:9};
+const DEFAULT_COVERAGE_START=8,DEFAULT_COVERAGE_END=17;
 // Snapshot data from Google Sheets export (KW25-KW27, captured 18.06.2026)
 // Source: Dienstplan_2026.xlsx
 const SNAPSHOT_KW25_27 = {
@@ -231,6 +232,31 @@ function availVal(p,d){var v=p.availability&&p.availability[d];if(v===true||v===
 function parseRange(t){var m=t&&t.match(/(\d{2}):(\d{2})\D+(\d{2}):(\d{2})/);return m?{s:+m[1]*60+ +m[2],e:+m[3]*60+ +m[4]}:null;}
 function availConflict(shift,av){if(av==="full")return false;if(av==="off")return true;var r=parseRange(shift.time);if(!r)return false;if(av==="am")return r.e>13*60;if(av==="pm")return r.s<13*60;return false;}
 function absCodeForCell(absences,pid,wk,dayCode){var a=(absences||[]).filter(function(x){return x.pid===pid&&isoDayCode(x.date)===dayCode&&isoWeekKey(x.date)===wk;});return a.length?a[0].code:null;}
+function planningHorizonWeeks(settings){
+  var value=Math.round(Number(settings&&settings.planningHorizonWeeks));
+  return Number.isFinite(value)&&value>=1&&value<=12?value:6;
+}
+function weekPlanComplete(s,sm,weekKey){
+  var plannedTeam=(s.team||[]).filter(function(p){return p.active&&!p.springer&&!p.eltern&&(Number(p.weeklyHours)>0||p.kitchen||p.cleaning);});
+  if(!plannedTeam.length)return false;
+  var wd=weekData(s,weekKey);
+  return plannedTeam.every(function(p){
+    return DAYS.every(function(day){
+      var absence=absCodeForCell(s.absences||[],p.id,weekKey,day);
+      if(absence&&sm[absence])return true;
+      var custom=wd.customShifts&&wd.customShifts[p.id]&&wd.customShifts[p.id][day];
+      if(custom&&custom.startTime!=null&&custom.endTime!=null)return true;
+      var code=cellCode(s,weekKey,p.id,day);
+      return !!(code&&sm[code]);
+    });
+  });
+}
+function planningWindowStatus(s,sm){
+  var requested=planningHorizonWeeks(s.settings);
+  var start=currentWeekIndex();
+  var weeks=WEEKS.slice(start,start+requested);
+  return {requested:requested,weeks:weeks,incomplete:weeks.filter(function(w){return !weekPlanComplete(s,sm,w.key);})};
+}
 
 function personWeek(s,sm,k,p,tsLog){
   var wd=weekData(s,k);
@@ -312,7 +338,19 @@ function buildRecommendation(c,backupForDay,absentPids,teamById){
   return parts;
 }
 
-const GANTT_START=8,GANTT_END=17.5;
+function coverageWindow(settings){
+  var start=Number(settings&&settings.coverageStart),end=Number(settings&&settings.coverageEnd);
+  if(!Number.isFinite(start)||start<0||start>=24)start=DEFAULT_COVERAGE_START;
+  if(!Number.isFinite(end)||end<=0||end>24)end=DEFAULT_COVERAGE_END;
+  if(end<=start){start=DEFAULT_COVERAGE_START;end=DEFAULT_COVERAGE_END;}
+  return {start:start,end:end};
+}
+function decimalTimeLabel(value){
+  var total=Math.round(Number(value)*60),hours=Math.floor(total/60),minutes=total%60;
+  return String(hours).padStart(2,"0")+":"+String(minutes).padStart(2,"0");
+}
+const HALF_HOUR_TIMES=Array.from({length:49},function(_,i){return i/2;});
+const PLANNING_HORIZON_OPTIONS=Array.from({length:12},function(_,i){return i+1;});
 function buildDayGantt(s,sm,k,d){
   var slots=[];
   var wd=weekData(s,k);
@@ -331,9 +369,9 @@ function buildDayGantt(s,sm,k,d){
   });
   return slots;
 }
-function hourlyCoverage(slots){
+function hourlyCoverage(slots,start,end){
   var buckets=[];
-  for(var h=GANTT_START;h<GANTT_END;h+=0.5){
+  for(var h=start;h<end;h+=0.5){
     var hh=h;
     var count=slots.filter(function(sl){return sl.start<=hh&&sl.end>hh&&!sl.kitchen&&!sl.cleaning;}).length;
     buckets.push({h:h,count:count});
@@ -673,7 +711,7 @@ function LoginScreen(){
   return React.createElement("div",{style:{fontFamily:FONT,minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:C.bg,padding:20}},
     React.createElement("div",{style:{width:"100%",maxWidth:380,background:C.surface,border:"1px solid "+C.line,borderRadius:14,padding:"28px 26px",boxShadow:"0 2px 10px rgba(0,0,0,.04)"}},
       React.createElement(Eyebrow,null,"Kita 30 Lobitos · parent initiative"),
-      React.createElement("h1",{style:{margin:"4px 0 18px",fontSize:21,fontWeight:800,letterSpacing:"-.02em"}},"Sign in to Shift Plan"),
+      React.createElement("h1",{style:{margin:"4px 0 18px",fontSize:21,fontWeight:800,letterSpacing:"-.02em"}},"Sign in to Dienstplan"),
       React.createElement("form",{onSubmit:handlePasswordSignIn,style:{display:"flex",flexDirection:"column",gap:12}},
         React.createElement(Field,{label:"Email"},
           React.createElement("input",{type:"email",value:email,autoComplete:"email",onChange:function(e){setEmail(e.target.value);},style:txtInput})
@@ -705,7 +743,7 @@ const numInput={fontFamily:FONT,width:56,fontSize:13,padding:"5px 6px",borderRad
 const txtInput={fontFamily:FONT,fontSize:13,padding:"5px 8px",borderRadius:6,border:"1px solid "+C.line,boxSizing:"border-box"};
 const emptyBox={background:C.surface,border:"1px dashed "+C.line,borderRadius:12,padding:"28px 20px",color:C.muted,textAlign:"center",fontSize:14};
 
-const ALL_SECTIONS=[["plan","Weekly plan"],["forecast","Coverage"],["absences","Absences"],["balances","Leave & Time Balance"],["timesheet","Timesheet"],["next8","Next 8 weeks"],["setup","Team & Shifts"],["admin","Admin"],["dev","Dev"]];
+const ALL_SECTIONS=[["forecast","Coverage"],["plan","Weekly plan"],["absences","Absences"],["balances","Leave & Time Balance"],["timesheet","Timesheet"],["next8","Next 8 weeks"],["setup","Team & Shifts"],["admin","Admin"],["dev","Dev"]];
 
 export default function App(){
   var s0={team:DEFAULT_TEAM,shifts:DEFAULT_SHIFTS,weeks:{},settings:DEFAULT_SETTINGS,absences:[],timesheetLog:[]};
@@ -718,7 +756,7 @@ export default function App(){
   // Absences undo/redo — separate from Weekly Plan history
   var absUndoArr=useState([]); var absUndoStack=absUndoArr[0],setAbsUndoStack=absUndoArr[1];
   var absRedoArr=useState([]); var absRedoStack=absRedoArr[0],setAbsRedoStack=absRedoArr[1];
-  var tabArr=useState("plan"); var tab=tabArr[0],setTab=tabArr[1];
+  var tabArr=useState("forecast"); var tab=tabArr[0],setTab=tabArr[1];
   var weekArr=useState(DEFAULT_WEEK); var week=weekArr[0],setWeek=weekArr[1];
   var vpArr=useState(""); var viewerPid=vpArr[0],setViewerPid=vpArr[1];
   var previewRoleArr=useState("dev"); var previewRole=previewRoleArr[0],setPreviewRole=previewRoleArr[1];
@@ -1073,7 +1111,7 @@ export default function App(){
       React.createElement("div",{style:{maxWidth:1200,margin:"0 auto",padding:"16px 24px",display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:12}},
         React.createElement("div",null,
           React.createElement(Eyebrow,null,"Kita 30 Lobitos · parent initiative"),
-          React.createElement("h1",{style:{margin:"2px 0 0",fontSize:25,fontWeight:800,letterSpacing:"-.02em"}},"Shift Plan")
+          React.createElement("h1",{style:{margin:"2px 0 0",fontSize:25,fontWeight:800,letterSpacing:"-.02em"}},"Dienstplan")
         ),
         React.createElement("div",{style:{display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}},
           effectiveRoleId==="team" && React.createElement(Field,{label:"You are"},
@@ -1139,19 +1177,29 @@ export default function App(){
 /* ================================================================== */
 function HourlyCoverageBar(props){
   var slots=props.slots,min=props.min;
-  var buckets=hourlyCoverage(slots);
-  var TOTAL=GANTT_END-GANTT_START;
-  function hFmt(h){var hh=Math.floor(h);var mm=h%1===0.5?"30":"00";return String(hh).padStart(2,"0")+":"+mm;}
-  var pedSlots=slots.filter(function(sl){return !sl.kitchen&&!sl.cleaning&&sl.start!=null;});
+  var win=coverageWindow(props.settings),chartStart=win.start,chartEnd=win.end;
+  var buckets=hourlyCoverage(slots,chartStart,chartEnd);
+  var TOTAL=chartEnd-chartStart;
+  function hFmt(h){return decimalTimeLabel(h);}
+  function axisFmt(h){return h%1===0?String(h).padStart(2,"0")+"h":decimalTimeLabel(h);}
+  var pedSlots=slots.filter(function(sl){return !sl.kitchen&&!sl.cleaning&&sl.start!=null&&sl.end>chartStart&&sl.start<chartEnd;});
+  var axisValues=[chartStart];
+  for(var axisHour=Math.ceil(chartStart);axisHour<chartEnd;axisHour+=1){if(axisHour>chartStart)axisValues.push(axisHour);}
+  if(axisValues[axisValues.length-1]!==chartEnd)axisValues.push(chartEnd);
   return React.createElement("div",{style:{marginTop:8}},
-    React.createElement("div",{style:{display:"flex",justifyContent:"space-between",fontSize:9.5,color:C.faint,marginBottom:2,userSelect:"none"}},
-      [8,9,10,11,12,13,14,15,16,17].map(function(h){return React.createElement("span",{key:h},String(h).padStart(2,"0")+"h");})
+    React.createElement("div",{style:{position:"relative",height:13,fontSize:9.5,color:C.faint,marginBottom:2,userSelect:"none"}},
+      axisValues.map(function(h){
+        var pos=((h-chartStart)/TOTAL)*100;
+        var transform=h===chartStart?"none":h===chartEnd?"translateX(-100%)":"translateX(-50%)";
+        return React.createElement("span",{key:h,style:{position:"absolute",left:pos+"%",transform:transform,whiteSpace:"nowrap"}},axisFmt(h));
+      })
     ),
     React.createElement("div",{style:{position:"relative",height:Math.max(16,pedSlots.length*14)+4,marginBottom:3}},
       React.createElement("div",{style:{position:"absolute",top:0,left:0,right:0,bottom:0,background:C.lineSoft,borderRadius:4}}),
       pedSlots.map(function(sl,i){
-        var left=((sl.start-GANTT_START)/TOTAL)*100;
-        var width=((sl.end-sl.start)/TOTAL)*100;
+        var visibleStart=Math.max(sl.start,chartStart),visibleEnd=Math.min(sl.end,chartEnd);
+        var left=((visibleStart-chartStart)/TOTAL)*100;
+        var width=((visibleEnd-visibleStart)/TOTAL)*100;
         var color=sl.eltern?C.eltern:sl.springer?C.springer:C.primary;
         var firstName=sl.name?sl.name.split(" ")[0]:"?";
         var barH=12;
@@ -1262,6 +1310,17 @@ function HistoryPanel(props){
   );
 }
 
+function PlanningWarningBanner(props){
+  var status=planningWindowStatus(props.state,props.sm);
+  if(!status.incomplete.length)return null;
+  var horizonCount=status.weeks.length;
+  var labels=status.incomplete.map(function(w){return w.kw;}).join(", ");
+  return React.createElement("div",{style:{background:C.tightBg,border:"1px solid "+C.tight+"55",borderRadius:10,padding:"11px 14px",marginBottom:14,color:C.tight}},
+    React.createElement("div",{style:{fontWeight:800,fontSize:13.5}},"Planning warning: The schedule for the next "+horizonCount+" "+(horizonCount===1?"week":"weeks")+" is incomplete."),
+    React.createElement("div",{style:{fontSize:12.5,marginTop:3}},status.incomplete.length+" "+(status.incomplete.length===1?"week still needs":"weeks still need")+" planning: "+labels+". Please plan ahead to protect coverage and give the team predictability.")
+  );
+}
+
 function PlanView(props){
   var state=props.state,sm=props.sm,week=props.week,setWeek=props.setWeek,editable=props.editable;
   var setCell=props.setCell,setNote=props.setNote,setAdj=props.setAdj,setMinOverride=props.setMinOverride,toggleWeek=props.toggleWeek;
@@ -1287,6 +1346,7 @@ function PlanView(props){
   var historyOpenArr=useState(false); var historyOpen=historyOpenArr[0],setHistoryOpen=historyOpenArr[1];
 
   return React.createElement("section",null,
+    React.createElement(PlanningWarningBanner,{state:state,sm:sm}),
     /* top bar */
     React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14,flexWrap:"wrap",gap:12}},
       React.createElement("div",{style:{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}},
@@ -1460,7 +1520,7 @@ function PlanView(props){
             React.createElement("span",{style:{fontWeight:700,fontSize:13}},d),
             React.createElement(StatusDot,{status:c.status})
           ),
-          React.createElement(HourlyCoverageBar,{slots:slots,min:c.min})
+          React.createElement(HourlyCoverageBar,{slots:slots,min:c.min,settings:state.settings})
         );
       })
     ),
@@ -1517,9 +1577,10 @@ function ForecastView(props){
   var curIdx=currentWeekIndex();
   var planned=WEEKS.filter(function(w,i){return i>=curIdx&&state.weeks[w.key]&&Object.values(state.weeks[w.key].assign||{}).some(function(a){return Object.keys(a).length;});});
   return React.createElement("section",null,
+    React.createElement(PlanningWarningBanner,{state:state,sm:sm}),
     React.createElement(Eyebrow,null,"Anticipate staffing needs"),
     React.createElement("h2",{style:{margin:"4px 0 4px",fontSize:19,fontWeight:700}},"Where the schedule gets tight"),
-    React.createElement("p",{style:{color:C.muted,fontSize:14,margin:"0 0 18px",maxWidth:640}},"Red = too few staff with children. 🍳✗ = no kitchen. 🧹✗ = no cleaning. Only weeks with a schedule are shown."),
+    React.createElement("p",{style:{color:C.muted,fontSize:14,margin:"0 0 18px",maxWidth:640}},"Red = not enough educators in the pedagogical team. 🍳✗ = no kitchen. 🧹✗ = no cleaning. Only weeks with a schedule are shown."),
     planned.length===0?React.createElement("div",{style:emptyBox},"No scheduled weeks yet."):
     React.createElement("div",{style:{display:"grid",gap:10}},
       planned.map(function(w){
@@ -1544,7 +1605,7 @@ function ForecastView(props){
               var recs=buildRecommendation(c,wBackup[DAYS[i]],[], wTeamById);
               return React.createElement("div",{key:i,style:{flex:"1 1 110px",minWidth:110,borderRadius:9,padding:"8px 10px",background:recs.length?C.gapBg:C.okBg,opacity:wDayIsPast[i]?0.35:1}},
                 React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between"}},React.createElement("span",{style:{fontWeight:700,fontSize:13}},DAYS[i]),React.createElement(StatusDot,{status:c.status})),
-                React.createElement("div",{style:{fontSize:12,marginTop:4,color:C.muted}},React.createElement("b",{style:{color:c.status==="gap"?C.gap:C.ink}},c.count),"/"+c.min+" with children"),
+                React.createElement("div",{style:{fontSize:12,marginTop:4,color:C.muted}},React.createElement("b",{style:{color:c.status==="gap"?C.gap:C.ink}},c.count+"/"+c.min)," in the pedagogical team"),
                 React.createElement("div",{style:{fontSize:11,marginTop:2}},React.createElement("span",{style:{color:c.kitchenOk?C.ok:C.gap}},"🍳"+(c.kitchenOk?"✓":"✗"))," ",React.createElement("span",{style:{color:c.cleaningOk?C.ok:C.gap}},"🧹"+(c.cleaningOk?"✓":"✗")),c.parentOnly?" ":""," ",c.parentOnly?React.createElement("span",{style:{color:C.gap,fontWeight:700}},"👨‍👩‍👧 no educator!"):""),
                 recs.length>0&&React.createElement("div",{style:{fontSize:11.5,marginTop:4,color:C.gap,fontWeight:600}},
                 React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:2}},
@@ -1572,7 +1633,7 @@ function ForecastView(props){
                     React.createElement("span",{style:{fontWeight:700,fontSize:11}},d),
                     React.createElement(StatusDot,{status:cv.status})
                   ),
-                  React.createElement(HourlyCoverageBar,{slots:slots,min:cv.min})
+                  React.createElement(HourlyCoverageBar,{slots:slots,min:cv.min,settings:state.settings})
                 );
               })
             )
@@ -2327,6 +2388,8 @@ function SetupView(props){
     setPasteData("");
   }
   function onFile(e){var f=e.target.files&&e.target.files[0];if(!f)return;f.text().then(applyImport).catch(function(){setMsg("Could not read the selected file.");});}
+  var coverageHours=coverageWindow(state.settings);
+  var planningWeeks=planningHorizonWeeks(state.settings);
 
   return React.createElement("section",{style:{display:"grid",gap:22}},
     React.createElement("div",null,
@@ -2380,6 +2443,32 @@ function SetupView(props){
                 React.createElement("button",{onClick:function(){update(function(st){st.shifts.push({code:"NEW",label:"New shift",start:null,end:null,hours:0,work:true,absence:false,sick:false,vacation:false,holiday:false});return st;});},style:Object.assign({},miniBtn,{color:C.primary,fontWeight:700})},"+ Add shift type")
               )
             )
+          )
+        )
+      ),
+      React.createElement(Eyebrow,null,"General settings"),
+      React.createElement("div",{style:{background:C.surface,border:"1px solid "+C.line,borderRadius:12,padding:"14px 16px",marginTop:10,marginBottom:18}},
+        React.createElement("div",{style:{fontSize:13,fontWeight:700,marginBottom:4}},"Coverage chart hours"),
+        React.createElement("div",{style:{fontSize:12,color:C.faint,marginBottom:10}},"Controls only the visible time range of the Coverage chart. It does not change shifts or calculated working hours."),
+        React.createElement("div",{style:{display:"flex",alignItems:"flex-end",gap:12,flexWrap:"wrap"}},
+          React.createElement(Field,{label:"Starts at"},
+            editable?React.createElement("select",{value:coverageHours.start,onChange:function(e){setSett("coverageStart",e.target.value);},style:Object.assign({},selStyle,{minWidth:100})},
+              HALF_HOUR_TIMES.filter(function(value){return value<coverageHours.end;}).map(function(value){return React.createElement("option",{key:value,value:value},decimalTimeLabel(value));})
+            ):React.createElement("span",{style:{fontWeight:700}},decimalTimeLabel(coverageHours.start))
+          ),
+          React.createElement(Field,{label:"Ends at"},
+            editable?React.createElement("select",{value:coverageHours.end,onChange:function(e){setSett("coverageEnd",e.target.value);},style:Object.assign({},selStyle,{minWidth:100})},
+              HALF_HOUR_TIMES.filter(function(value){return value>coverageHours.start;}).map(function(value){return React.createElement("option",{key:value,value:value},decimalTimeLabel(value));})
+            ):React.createElement("span",{style:{fontWeight:700}},decimalTimeLabel(coverageHours.end))
+          )
+        ),
+        React.createElement("div",{style:{borderTop:"1px solid "+C.lineSoft,marginTop:14,paddingTop:14}},
+          React.createElement("div",{style:{fontSize:13,fontWeight:700,marginBottom:4}},"Planning horizon"),
+          React.createElement("div",{style:{fontSize:12,color:C.faint,marginBottom:10}},"The warning in Coverage and Weekly Plan checks the current week plus the following weeks."),
+          React.createElement(Field,{label:"Weeks that should be planned"},
+            editable?React.createElement("select",{value:planningWeeks,onChange:function(e){setSett("planningHorizonWeeks",e.target.value);},style:Object.assign({},selStyle,{minWidth:100})},
+              PLANNING_HORIZON_OPTIONS.map(function(value){return React.createElement("option",{key:value,value:value},value);})
+            ):React.createElement("span",{style:{fontWeight:700}},planningWeeks)
           )
         )
       ),
