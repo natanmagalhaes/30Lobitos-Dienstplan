@@ -863,17 +863,18 @@ export default function App(){
         throw new Error("Invalid or empty app_state data");
       }
       skipNextSaveRef.current=true;
-      var merged=null;
-      setState(function(p){
-        merged=Object.assign({},p,s,{settings:Object.assign({},DEFAULT_SETTINGS,s.settings||{}),absences:s.absences||[],timesheetLog:s.timesheetLog||[]});
-        return merged;
-      });
+      // Compute the loaded baseline synchronously before updating React state.
+      // A value assigned inside a functional state updater is not guaranteed to
+      // exist immediately; that race could leave lastPersistedRef as null and
+      // make the first real edit produce no audit events.
+      var merged=Object.assign({},s0,s,{settings:Object.assign({},DEFAULT_SETTINGS,s.settings||{}),absences:s.absences||[],timesheetLog:s.timesheetLog||[]});
       lastPersistedRef.current=merged;
       expectedVersionRef.current=res.version;
       if(res.updatedAt)setLastDataUpdate(res.updatedAt);
       setRemoteLoadedSuccessfully(true);
       setLoaded(true);
       setSyncStatus("connected");
+      setState(merged);
     }).catch(function(e){
       console.warn("loadState failed:",e);
       setLoaded(true);
