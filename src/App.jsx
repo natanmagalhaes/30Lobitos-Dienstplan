@@ -285,12 +285,36 @@ function personWeek(s,sm,k,p,tsLog){
     sickDays:days.filter(function(c){return sm[c]&&sm[c].sick;}).length,
     hasAny:codes.length>0||adj!==0||hasTs,hasTs:hasTs,divergence:divergence};
 }
+function personAbsenceSummary(s,sm,pid){
+  var summary={vacation:[],sick:[],childSick:[],training:[],ffu:[],other:[]};
+  WEEKS.forEach(function(w){
+    DAYS.forEach(function(day){
+      var formalAbsence=(s.absences||[]).find(function(a){return a.pid===pid&&a.status!=="rejected"&&isoDayCode(a.date)===day&&isoWeekKey(a.date)===w.key;});
+      var absence=formalAbsence&&formalAbsence.code;
+      var code=absence||cellCode(s,w.key,pid,day);
+      var shift=sm[code];
+      if(!shift)return;
+      var category=null;
+      if(shift.vacation)category="vacation";
+      else if(code==="Sick-K")category="childSick";
+      else if(shift.sick)category="sick";
+      else if(code==="Training")category="training";
+      else if(code==="FFU")category="ffu";
+      else if(shift.absence&&code!=="Off"&&!shift.holiday)category="other";
+      if(category)summary[category].push(planDayDate(w.key,day));
+    });
+  });
+  return summary;
+}
 function balances(s,sm){
   var tsLog=s.timesheetLog||[];
   return s.team.map(function(p){
-    var vacTaken=0,sick=0,ot=p.startOvertime;
-    WEEKS.forEach(function(w){var pw=personWeek(s,sm,w.key,p,tsLog);vacTaken+=pw.vacDays;sick+=pw.sickDays;if(weekData(s,w.key).confirmed&&pw.hasAny)ot+=pw.delta;});
-    return Object.assign({},p,{vacTaken:vacTaken,sick:sick,overtime:ot,vacLeft:p.vacationAllowance-vacTaken});
+    var ot=p.startOvertime;
+    WEEKS.forEach(function(w){var pw=personWeek(s,sm,w.key,p,tsLog);if(weekData(s,w.key).confirmed&&pw.hasAny)ot+=pw.delta;});
+    var absenceSummary=personAbsenceSummary(s,sm,p.id);
+    var vacTaken=absenceSummary.vacation.length;
+    var sick=absenceSummary.sick.length+absenceSummary.childSick.length;
+    return Object.assign({},p,{vacTaken:vacTaken,sick:sick,overtime:ot,vacLeft:p.vacationAllowance-vacTaken,absenceSummary:absenceSummary});
   });
 }
 function dayCoverages(s,sm,k,d,min){
@@ -743,7 +767,7 @@ const numInput={fontFamily:FONT,width:56,fontSize:13,padding:"5px 6px",borderRad
 const txtInput={fontFamily:FONT,fontSize:13,padding:"5px 8px",borderRadius:6,border:"1px solid "+C.line,boxSizing:"border-box"};
 const emptyBox={background:C.surface,border:"1px dashed "+C.line,borderRadius:12,padding:"28px 20px",color:C.muted,textAlign:"center",fontSize:14};
 
-const ALL_SECTIONS=[["forecast","Coverage"],["plan","Weekly plan"],["absences","Absences"],["balances","Leave & Time Balance"],["timesheet","Timesheet"],["next8","Next 8 weeks"],["setup","Team & Shifts"],["admin","Admin"],["dev","Dev"]];
+const ALL_SECTIONS=[["forecast","Overview"],["plan","Weekly plan"],["next8","Forecast"],["absences","Absences"],["balances","Leave & Time Balance"],["timesheet","Timesheet"],["setup","Team & Shifts"],["admin","Admin"],["dev","Dev"]];
 
 export default function App(){
   var s0={team:DEFAULT_TEAM,shifts:DEFAULT_SHIFTS,weeks:{},settings:DEFAULT_SETTINGS,absences:[],timesheetLog:[]};
@@ -932,17 +956,27 @@ export default function App(){
     }
     runSaveCycle();
   },[state,userId,profileCanAccessApp,remoteLoadedSuccessfully]);
-  useEffect(function(){if(!viewerPid&&state.team.length){var p=state.team.find(function(x){return x.active;});if(p)setViewerPid(p.id);}},[state.team]);
-
   var isDevUser=!!(profile&&profile.role_id==="dev");
   var effectiveRoleId=isDevUser?previewRole:(profile?profile.role_id:null);
+  var educatorPersonalRole=effectiveRoleId==="team";
+  useEffect(function(){
+    if(educatorPersonalRole&&!isDevUser){
+      var linkedPid=profile&&profile.person_id;
+      var linkedPerson=linkedPid&&state.team.find(function(p){return p.id===linkedPid&&p.active;});
+      if(linkedPerson){if(viewerPid!==linkedPerson.id)setViewerPid(linkedPerson.id);}
+      else if(viewerPid)setViewerPid("");
+      return;
+    }
+    if(!viewerPid&&state.team.length){var p=state.team.find(function(x){return x.active;});if(p)setViewerPid(p.id);}
+  },[state.team,profile&&profile.person_id,educatorPersonalRole,isDevUser]);
+
   function sectionPerm(sectionId){
     if(!rolePerms||!effectiveRoleId)return {can_view:false,can_edit:false};
     var r=rolePerms[effectiveRoleId];
     if(!r||!r[sectionId])return {can_view:false,can_edit:false};
     return r[sectionId];
   }
-  var tabs=ALL_SECTIONS.filter(function(s){return sectionPerm(s[0]).can_view;});
+  var tabs=ALL_SECTIONS.filter(function(s){return sectionPerm(s[0]).can_view&&!(educatorPersonalRole&&s[0]==="balances");});
   useEffect(function(){if(tabs.length&&!tabs.some(function(t){return t[0]===tab;}))setTab(tabs[0][0]);},[effectiveRoleId,rolePerms]);
 
   var sm=useMemo(function(){return shiftMap(state.shifts);},[state.shifts]);
@@ -1114,7 +1148,7 @@ export default function App(){
           React.createElement("h1",{style:{margin:"2px 0 0",fontSize:25,fontWeight:800,letterSpacing:"-.02em"}},"Dienstplan")
         ),
         React.createElement("div",{style:{display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}},
-          effectiveRoleId==="team" && React.createElement(Field,{label:"You are"},
+          isDevUser&&educatorPersonalRole && React.createElement(Field,{label:"Preview person"},
             React.createElement("select",{value:viewerPid,onChange:function(e){setViewerPid(e.target.value);},style:Object.assign({},selStyle,{padding:"5px 8px",fontSize:12.5})},
               state.team.filter(function(p){return p.active;}).map(function(p){return React.createElement("option",{key:p.id,value:p.id},p.name);})
             )
@@ -1153,7 +1187,7 @@ export default function App(){
       tab==="absences"  && React.createElement(AbsencesView,{state:state,sm:sm,update:absUpdate,editable:sectionPerm("absences").can_edit,viewerPid:viewerPid,absUndo:absUndo,absRedo:absRedo,absUndoStack:absUndoStack,absRedoStack:absRedoStack}),
       tab==="balances"  && React.createElement(BalancesView,{state:state,sm:sm,update:update,editable:sectionPerm("balances").can_edit}),
       tab==="timesheet" && React.createElement(TimesheetView,{state:state,sm:sm,update:update,editable:sectionPerm("timesheet").can_edit,viewerPid:viewerPid}),
-      tab==="next8"     && React.createElement(Next8View,{state:state,sm:sm,viewerPid:viewerPid,editable:sectionPerm("next8").can_edit}),
+      tab==="next8"     && React.createElement(Next8View,{state:state,sm:sm,viewerPid:viewerPid,personalMode:educatorPersonalRole,canChoosePerson:!educatorPersonalRole||isDevUser}),
       tab==="setup"     && React.createElement(SetupView,{state:state,update:update,editable:sectionPerm("setup").can_edit,setState:setState,markNextSaveBulk:markNextSaveBulk,effectiveRoleId:effectiveRoleId}),
       tab==="admin"     && React.createElement(AdminView,{state:state,effectiveRoleId:effectiveRoleId,userId:userId}),
       tab==="dev"       && React.createElement(DevView,{onPermsChange:function(roleId,sectionId,payload){
@@ -1907,19 +1941,24 @@ function BalancesView(props){
   return React.createElement("section",null,
     React.createElement(Eyebrow,null,"Leave & Time Balance"),
     React.createElement("h2",{style:{margin:"4px 0 4px",fontSize:19,fontWeight:700}},"Leave & Time Balance"),
-    React.createElement("p",{style:{color:C.muted,fontSize:14,margin:"0 0 18px",maxWidth:660}},"Overtime counts only ",React.createElement("b",null,"confirmed")," weeks. ",React.createElement(Pill,{tone:"warn"},"TS")," means that week's total was overridden by a submitted timesheet."),
+    React.createElement("p",{style:{color:C.muted,fontSize:14,margin:"0 0 18px",maxWidth:760}},"Overtime counts only ",React.createElement("b",null,"confirmed")," weeks. Absence totals cover the 2026 schedule. Off days and public holidays are not counted. ",React.createElement(Pill,{tone:"warn"},"TS")," means that week's total was overridden by a submitted timesheet."),
     React.createElement("div",{style:{background:C.surface,border:"1px solid "+C.line,borderRadius:12,overflow:"hidden",overflowX:"auto"}},
-      React.createElement("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:720,fontSize:13.5}},
+      React.createElement("table",{style:{borderCollapse:"collapse",width:"100%",minWidth:1080,fontSize:13}},
         React.createElement("thead",null,React.createElement("tr",{style:{background:C.lineSoft}},
-          React.createElement("th",{style:Object.assign({},th,{textAlign:"left"})},"Team member"),React.createElement("th",{style:th},"Vacation used"),React.createElement("th",{style:th},"Vacation left"),React.createElement("th",{style:th},"Sick (days)"),React.createElement("th",{style:th},"Overtime"),React.createElement("th",{style:Object.assign({},th,{textAlign:"left",minWidth:180})},"Notes")
+          React.createElement("th",{style:Object.assign({},th,{textAlign:"left"})},"Team member"),React.createElement("th",{style:th},"Vacation planned/used"),React.createElement("th",{style:th},"Vacation left"),React.createElement("th",{style:th},"Sick"),React.createElement("th",{style:th},"Child sick"),React.createElement("th",{style:th},"Training"),React.createElement("th",{style:th},"FFU"),React.createElement("th",{style:th},"Other"),React.createElement("th",{style:th},"Overtime"),React.createElement("th",{style:Object.assign({},th,{textAlign:"left",minWidth:180})},"Notes")
         )),
         React.createElement("tbody",null,rows.map(function(p){
           var hasTsOt=WEEKS.some(function(w){var pw=personWeek(state,sm,w.key,p,tsLog);return weekData(state,w.key).confirmed&&pw.hasTs;});
+          var a=p.absenceSummary||{vacation:[],sick:[],childSick:[],training:[],ffu:[],other:[]};
           return React.createElement("tr",{key:p.id,style:{borderTop:"1px solid "+C.lineSoft}},
             React.createElement("td",{style:Object.assign({},td,{textAlign:"left",fontWeight:600})},p.name,!p.active&&React.createElement("span",{style:{color:C.faint,fontSize:11,marginLeft:6}},"inactive"),hasTsOt&&React.createElement("span",{style:{marginLeft:6}},React.createElement(Pill,{tone:"warn"},"TS"))),
-            React.createElement("td",{style:td},p.vacTaken),
+            React.createElement("td",{style:td,title:a.vacation.join(", ")},p.vacTaken),
             React.createElement("td",{style:td},React.createElement(Pill,{tone:p.vacLeft<0?"gap":p.vacLeft<=5?"tight":"neutral"},p.vacLeft+" / "+p.vacationAllowance)),
-            React.createElement("td",{style:td},p.sick),
+            React.createElement("td",{style:td,title:a.sick.join(", ")},a.sick.length),
+            React.createElement("td",{style:td,title:a.childSick.join(", ")},a.childSick.length),
+            React.createElement("td",{style:td,title:a.training.join(", ")},a.training.length),
+            React.createElement("td",{style:td,title:a.ffu.join(", ")},a.ffu.length),
+            React.createElement("td",{style:td,title:a.other.join(", ")},a.other.length),
             React.createElement("td",{style:Object.assign({},td,{fontWeight:700,color:p.overtime>0.05?C.ok:p.overtime<-0.05?C.gap:C.muted})},(p.overtime>0?"+":"")+round(p.overtime)+" h"),
             React.createElement("td",{style:Object.assign({},td,{padding:3,textAlign:"left"})},editable?React.createElement("textarea",{value:p.note||"",onChange:function(e){setNote(p.id,e.target.value);e.target.style.height="auto";e.target.style.height=e.target.scrollHeight+"px";},placeholder:"—",rows:1,style:Object.assign({},txtInput,{width:"100%",minWidth:160,resize:"none",overflow:"hidden",lineHeight:"1.4",boxSizing:"border-box"})})
               :React.createElement("span",{style:{color:C.muted}},p.note))
@@ -1931,20 +1970,65 @@ function BalancesView(props){
 }
 
 /* ================================================================== */
+function PersonalBalanceCard(props){
+  var state=props.state,sm=props.sm,person=props.person,personalMode=props.personalMode;
+  var row=balances(state,sm).find(function(p){return p.id===person.id;});
+  if(!row)return null;
+  var a=row.absenceSummary||{vacation:[],sick:[],childSick:[],training:[],ffu:[],other:[]};
+  var items=[
+    ["Vacation planned/used",a.vacation,"ok"],
+    ["Sick",a.sick,"gap"],
+    ["Child sick",a.childSick,"tight"],
+    ["Training",a.training,"neutral"],
+    ["FFU",a.ffu,"neutral"],
+    ["Other absence",a.other,"neutral"]
+  ];
+  return React.createElement("div",{style:{background:C.surface,border:"1px solid "+C.line,borderRadius:12,padding:"14px 16px",marginBottom:16}},
+    React.createElement("div",{style:{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:12,flexWrap:"wrap",marginBottom:12}},
+      React.createElement("div",null,
+        React.createElement(Eyebrow,null,personalMode?"My leave & time balance":"Personal leave & time balance"),
+        React.createElement("div",{style:{fontSize:17,fontWeight:800,marginTop:3}},person.name)
+      ),
+      React.createElement("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}},
+        React.createElement(Pill,{tone:row.vacLeft<0?"gap":row.vacLeft<=5?"tight":"ok"},"Vacation: "+row.vacLeft+" of "+row.vacationAllowance+" left"),
+        React.createElement(Pill,{tone:row.overtime>0.05?"ok":row.overtime<-0.05?"gap":"neutral"},"Time balance: "+(row.overtime>0?"+":"")+round(row.overtime)+" h")
+      )
+    ),
+    React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:8}},
+      items.map(function(item){
+        var dates=item[1]||[];
+        return React.createElement("div",{key:item[0],style:{background:C.lineSoft,borderRadius:9,padding:"9px 10px",minHeight:62}},
+          React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}},
+            React.createElement("span",{style:{fontSize:12,fontWeight:700}},item[0]),
+            React.createElement(Pill,{tone:item[2]},dates.length+" "+(dates.length===1?"day":"days"))
+          ),
+          React.createElement("div",{style:{fontSize:11,color:C.muted,marginTop:6,lineHeight:1.4}},dates.length?dates.join(", "):"No recorded dates")
+        );
+      })
+    ),
+    React.createElement("div",{style:{fontSize:11,color:C.faint,marginTop:10}},"2026 app records · informational only. Off days and public holidays are not counted.")
+  );
+}
+
 function Next8View(props){
-  var state=props.state,sm=props.sm,viewerPid=props.viewerPid,editable=props.editable;
+  var state=props.state,sm=props.sm,viewerPid=props.viewerPid,personalMode=props.personalMode,canChoosePerson=props.canChoosePerson;
   var ci=currentWeekIndex();
-  var win=WEEKS.slice(ci,ci+8);
+  var horizon=planningHorizonWeeks(state.settings);
+  var win=WEEKS.slice(ci,ci+horizon);
   var team=state.team.filter(function(p){return p.active;});
-  var fArr=useState(editable?"all":viewerPid||"all"); var filter=fArr[0],setFilter=fArr[1];
-  var list=filter==="all"?team:team.filter(function(p){return p.id===filter;});
+  var fArr=useState("all"); var filter=fArr[0],setFilter=fArr[1];
+  var personalPerson=personalMode?team.find(function(p){return p.id===viewerPid;}):null;
+  var selectedPerson=!personalMode&&filter!=="all"?team.find(function(p){return p.id===filter;}):personalPerson;
+  var list=personalMode?(personalPerson?[personalPerson]:[]):filter==="all"?team:team.filter(function(p){return p.id===filter;});
   function cellText(k,pid,d){var ab=absCodeForCell(state.absences||[],pid,k,d);var c=ab||cellCode(state,k,pid,d);var s=sm[c];if(!s)return"—";if(s.work)return s.time||s.hours+"h";return s.code;}
   return React.createElement("section",null,
-    React.createElement(Eyebrow,null,"Next 8 weeks from today"),
+    React.createElement(Eyebrow,null,"Forecast · next "+win.length+" "+(win.length===1?"week":"weeks")),
     React.createElement("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:10,margin:"4px 0 16px"}},
-      React.createElement("h2",{style:{margin:0,fontSize:19,fontWeight:700}},"Who works when"),
-      editable&&React.createElement("select",{value:filter,onChange:function(e){setFilter(e.target.value);},style:selStyle},React.createElement("option",{value:"all"},"Everyone"),team.map(function(p){return React.createElement("option",{key:p.id,value:p.id},p.name);}))
+      React.createElement("h2",{style:{margin:0,fontSize:19,fontWeight:700}},personalMode?"My schedule & balance":"Who works when"),
+      !personalMode&&canChoosePerson&&React.createElement("select",{value:filter,onChange:function(e){setFilter(e.target.value);},style:selStyle},React.createElement("option",{value:"all"},"Everyone"),team.map(function(p){return React.createElement("option",{key:p.id,value:p.id},p.name);}))
     ),
+    personalMode&&!personalPerson&&React.createElement("div",{style:Object.assign({},emptyBox,{marginBottom:16})},"Your login is not linked to a team member yet. Ask an administrator to set the person in Admin."),
+    selectedPerson&&React.createElement(PersonalBalanceCard,{state:state,sm:sm,person:selectedPerson,personalMode:personalMode}),
     React.createElement("div",{style:{display:"grid",gap:14}},
       list.map(function(p){
         return React.createElement("div",{key:p.id,style:{background:C.surface,border:"1px solid "+C.line,borderRadius:12,overflow:"hidden"}},
@@ -2118,7 +2202,7 @@ function DevView(props){
     } else {
       canEdit=value;
       if(value)canView=true; // turning Edit on always turns View on too
-      if(sectionId==="forecast")canEdit=false; // Coverage is never editable, no exceptions
+      if(sectionId==="forecast")canEdit=false; // Overview is never editable, no exceptions
     }
     var payload={role_id:roleId,section_id:sectionId,can_view:canView,can_edit:canEdit};
     var key=roleId+"|"+sectionId;
@@ -2156,7 +2240,7 @@ function DevView(props){
     React.createElement(Eyebrow,null,"Dev"),
     React.createElement("h2",{style:{margin:"4px 0 4px",fontSize:19,fontWeight:700}},"Role permissions"),
     React.createElement("div",{style:{fontSize:12.5,color:C.muted,marginBottom:6,maxWidth:660}},
-      "Controls which sections each role can see and edit. Coverage is always view-only for every role. The Admin and Dev columns' Admin/Dev rows are fixed and cannot be changed here — Dev always has full access to both; Admin always has full access to Admin only; every other role has none."
+      "Controls which sections each role can see and edit. Overview is always view-only for every role. The Admin and Dev columns' Admin/Dev rows are fixed and cannot be changed here — Dev always has full access to both; Admin always has full access to Admin only; every other role has none."
     ),
     React.createElement("div",{style:{overflowX:"auto"}},
     React.createElement("table",{style:{borderCollapse:"collapse",minWidth:780}},
@@ -2469,7 +2553,7 @@ function SetupView(props){
         ),
         React.createElement("div",{style:{borderTop:"1px solid "+C.lineSoft,marginTop:14,paddingTop:14}},
           React.createElement("div",{style:{fontSize:13,fontWeight:700,marginBottom:4}},"Planning horizon"),
-          React.createElement("div",{style:{fontSize:12,color:C.faint,marginBottom:10}},"The warning in Coverage and Weekly Plan checks the current week plus the following weeks."),
+          React.createElement("div",{style:{fontSize:12,color:C.faint,marginBottom:10}},"The warning in Overview and Weekly Plan checks the current week plus the following weeks."),
           React.createElement(Field,{label:"Weeks that should be planned"},
             editable?React.createElement("select",{value:planningWeeks,onChange:function(e){setSett("planningHorizonWeeks",e.target.value);},style:Object.assign({},selStyle,{minWidth:100})},
               PLANNING_HORIZON_OPTIONS.map(function(value){return React.createElement("option",{key:value,value:value},value);})
