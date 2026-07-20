@@ -1312,12 +1312,17 @@ function HistoryPanel(props){
 
 function PlanningWarningBanner(props){
   var status=planningWindowStatus(props.state,props.sm);
-  if(!status.incomplete.length)return null;
+  if(!status.incomplete.length||!status.weeks.length)return null;
+  var incompleteCount=status.incomplete.length;
   var horizonCount=status.weeks.length;
-  var labels=status.incomplete.map(function(w){return w.kw;}).join(", ");
+  var targetWeek=status.weeks[status.weeks.length-1];
   return React.createElement("div",{style:{background:C.tightBg,border:"1px solid "+C.tight+"55",borderRadius:10,padding:"11px 14px",marginBottom:14,color:C.tight}},
-    React.createElement("div",{style:{fontWeight:800,fontSize:13.5}},"Planning warning: The schedule for the next "+horizonCount+" "+(horizonCount===1?"week":"weeks")+" is incomplete."),
-    React.createElement("div",{style:{fontSize:12.5,marginTop:3}},status.incomplete.length+" "+(status.incomplete.length===1?"week still needs":"weeks still need")+" planning: "+labels+". Please plan ahead to protect coverage and give the team predictability.")
+    React.createElement("div",{style:{fontSize:13}},
+      React.createElement("strong",null,"Recommendation: "+incompleteCount+" of the next "+horizonCount+" "+(horizonCount===1?"week":"weeks")+" "+(incompleteCount===1?"remains":"remain")+" unplanned."),
+      " Please complete planning through ",
+      React.createElement("strong",null,targetWeek.kw),
+      " to ensure better coverage and give the team predictability."
+    )
   );
 }
 
